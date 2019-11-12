@@ -1,5 +1,11 @@
 package mapreduce
 
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -44,4 +50,35 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+	kvPairs := make(map[string][]string)
+	for i := 0; i < nMap; i++ {
+		interFile, err := os.Open(reduceName(jobName, i, reduceTask))
+		if err != nil {
+			debug("Cannot open intermediate file %s", reduceName(jobName, i, reduceTask))
+			return
+		}
+		reader := bufio.NewReader(interFile)
+		decoder := json.NewDecoder(reader)
+		for decoder.More() {
+			var kv KeyValue
+			err := decoder.Decode(&kv)
+			if err != nil {
+				debug("Cannot decode json file %s", reduceName(jobName, i, reduceTask))
+			}
+			kvPairs[kv.Key] = append(kvPairs[kv.Key], kv.Value)
+		}
+		interFile.Close()
+	}
+
+	outputFile, outputError := os.Create(outFile)
+	if outputError != nil {
+		debug("Cannot create output file %s", outFile)
+		return
+	}
+	defer outputFile.Close()
+	encoder := json.NewEncoder(outputFile)
+	for key := range kvPairs {
+		encoder.Encode(KeyValue{key, reduceF(key, kvPairs[key])})
+	}
+	return
 }
