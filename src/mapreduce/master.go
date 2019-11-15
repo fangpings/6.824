@@ -50,7 +50,7 @@ func newMaster(master string) (mr *Master) {
 	mr = new(Master)
 	mr.address = master
 	mr.shutdown = make(chan struct{})
-	mr.newCond = sync.NewCond(mr)
+	mr.newCond = sync.NewCond(mr) // 实际上应该传一个locker变量进去，但是master struct有一个匿名变量sync.Mutex，所以相当于是继承了locker
 	mr.doneChannel = make(chan bool)
 	return
 }
