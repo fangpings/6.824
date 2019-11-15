@@ -157,5 +157,5 @@ func RunWorker(MasterAddress string, me string,
 		}
 	}
 	wk.l.Close()
-	debug("RunWorker %s exit\n", me)
+	fmt.Println("RunWorker exit" + me)
 }

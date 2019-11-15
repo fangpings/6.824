@@ -43,12 +43,17 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		}
 		args := DoTaskArgs{jobName, fileName, phase, i, n_other}
 		wg.Add(1)
+
 		go func(args DoTaskArgs) {
-			w := <-availableWorker
-			c, errx := rpc.Dial("unix", w)
-			if errx != nil {
-				availableWorker <- w
-				return
+			var c *rpc.Client
+			var errx error
+			var w string
+			for {
+				w = <-availableWorker
+				c, errx = rpc.Dial("unix", w)
+				if errx == nil {
+					break
+				}
 			}
 			defer c.Close()
 
