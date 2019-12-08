@@ -175,7 +175,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("term %d id %d getting vote request from %d whose term is %d", rf.currentTerm, rf.me, args.CandidateID, args.Term)
+	// DPrintf("term %d id %d getting vote request from %d whose term is %d", rf.currentTerm, rf.me, args.CandidateID, args.Term)
 	// leader 和 candidate在当前term肯定都投给自己了，不用像AppendEntry一样做很多检查
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -194,13 +194,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateID
 				rf.lastUpdate = time.Now()
-				DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
+				// DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
 				return
 			} else {
-				DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
+				// DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
 			}
 		} else {
-			DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
+			// DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
 		}
 	}
 	reply.VoteGranted = false
@@ -276,7 +276,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	rf.lastUpdate = time.Now()
-	DPrintf("term %d id %d state %d receiving update from %d whose term %d", rf.currentTerm, rf.me, rf.state, args.LeaderId, args.Term)
+	// DPrintf("term %d id %d state %d receiving update from %d whose term %d", rf.currentTerm, rf.me, rf.state, args.LeaderId, args.Term)
 
 	// 如果当前状态是follower, 且检查到term > currentTerm, 那么直接更新term
 	// 如果当前状态是leader, 那么term不可能撞车的（根据paper，同一term只会选出一个leader），所以检查到term > currentTerm，重新回到follower就行
@@ -302,8 +302,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 论文上说是确定match之后Append any new entries not already in the log
 	// 但是我们的操作是每次leader会发送从prevIndex到最新的所有log给follower
-	// 所以我们确定match之后直接覆盖所有就行了
-	rf.log = append(rf.log, args.Entries...)
+	// 所以我们确定match之后从match的index直接覆盖所有就行了
+	if len(args.Entries) > 0 {
+		DPrintf("term %d id %d log to be appended %v", rf.currentTerm, rf.me, args.Entries)
+	}
+	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 
 	// TODO: the advice says applyCh could congest
 	// so the better way to do this is to send commit message
@@ -311,16 +314,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// commit index
 	if args.LeaderCommit > rf.commitIndex {
 		// doing the commit
-		history := rf.commitIndex + 1
+		history := rf.commitIndex + 1 // just for debugging
 		if args.LeaderCommit > len(rf.log)-1 {
 			rf.commitIndex = len(rf.log) - 1
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
+
+		// just for debugging
 		for i := history; i <= rf.commitIndex; i++ {
-			msg := ApplyMsg{true, rf.log[i].Command, i}
-			rf.applyCh <- msg
+			DPrintf("term %d id %d log %v commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
 		}
+		DPrintf("term %d id %d current log %v", rf.currentTerm, rf.me, rf.log)
 	}
 }
 
@@ -394,6 +399,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	if rf.state == leader {
 		rf.log = append(rf.log, logEntry{command, rf.currentTerm})
+		DPrintf("term %d id %d receiving log %v from client, will be appended to %d", rf.currentTerm, rf.me, command, len(rf.log)-1)
 	}
 
 	return len(rf.log) - 1, rf.currentTerm, rf.state == leader
@@ -441,6 +447,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	go rf.onBecomingFollower()
+	go rf.checkingCommit()
 	// go rf.reportingState()
 
 	return rf
@@ -448,7 +455,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) onBecomingFollower() {
 	rf.mu.Lock()
-	DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
+	// DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
 	rf.state = follower
 	rf.lastUpdate = time.Now()
 	rf.mu.Unlock()
@@ -458,7 +465,7 @@ func (rf *Raft) onBecomingFollower() {
 		rf.mu.Lock()
 		if time.Since(rf.lastUpdate) > rf.electionTimeout {
 			// DPrintf("term %d id %d timeout", rf.currentTerm, rf.me)
-			DPrintf("term %d id %d time out, quitting follower", rf.currentTerm, rf.me)
+			// DPrintf("term %d id %d time out, quitting follower", rf.currentTerm, rf.me)
 			go rf.onBecomingCandidate()
 			rf.mu.Unlock()
 			return
@@ -471,7 +478,7 @@ func (rf *Raft) onBecomingFollower() {
 
 func (rf *Raft) onBecomingCandidate() {
 	rf.mu.Lock()
-	DPrintf("term %d id %d becoming candidate", rf.currentTerm, rf.me)
+	// DPrintf("term %d id %d becoming candidate", rf.currentTerm, rf.me)
 	rf.state = candidate
 	rf.mu.Unlock()
 
@@ -479,7 +486,7 @@ func (rf *Raft) onBecomingCandidate() {
 		rf.mu.Lock()
 		lastUpdate := time.Now()
 		if rf.state == follower {
-			DPrintf("term %d id %d quitting candidate 1", rf.currentTerm, rf.me)
+			// DPrintf("term %d id %d quitting candidate 1", rf.currentTerm, rf.me)
 			rf.mu.Unlock()
 			return
 		}
@@ -494,7 +501,7 @@ func (rf *Raft) onBecomingCandidate() {
 				continue
 			}
 			if rf.state == follower {
-				DPrintf("term %d id %d quitting candidate 2", rf.currentTerm, rf.me)
+				// DPrintf("term %d id %d quitting candidate 2", rf.currentTerm, rf.me)
 				rf.mu.Unlock()
 				return
 			}
@@ -510,7 +517,7 @@ func (rf *Raft) onBecomingCandidate() {
 		for {
 			rf.mu.Lock()
 			if rf.state == follower {
-				DPrintf("term %d id %d quitting candidate 3(state changes)", rf.currentTerm, rf.me)
+				// DPrintf("term %d id %d quitting candidate 3(state changes)", rf.currentTerm, rf.me)
 				rf.mu.Unlock()
 				return
 			}
@@ -521,7 +528,7 @@ func (rf *Raft) onBecomingCandidate() {
 				break
 			}
 			if count >= rf.majority {
-				DPrintf("term %d id %d getting %d votes, becoming leader", rf.currentTerm, rf.me, count)
+				// DPrintf("term %d id %d getting %d votes, becoming leader", rf.currentTerm, rf.me, count)
 				rf.mu.Unlock()
 				go rf.onBecomingLeader()
 				return
@@ -533,7 +540,7 @@ func (rf *Raft) onBecomingCandidate() {
 			rf.mu.Unlock()
 			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
-		DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
+		// DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
 	}
 }
 
@@ -566,7 +573,9 @@ func (rf *Raft) onBecomingLeader() {
 		time.Sleep(time.Duration(100) * time.Millisecond)
 
 		rf.mu.Lock()
-		lastCommit := rf.commitIndex + 1
+
+		lastCommit := rf.commitIndex + 1 // only for debugging
+
 		for i := rf.commitIndex + 1; i < len(rf.log); i++ {
 			count := 1
 			for j := 0; j < rf.numPeers; j++ {
@@ -581,11 +590,31 @@ func (rf *Raft) onBecomingLeader() {
 				rf.commitIndex = i
 			}
 		}
+
 		for i := lastCommit; i <= rf.commitIndex; i++ {
+			DPrintf("term %d id %d log %v leader commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) checkingCommit() {
+	lastCommit := 0
+	for {
+		commitIndex := rf.commitIndex
+
+		for i := lastCommit + 1; i <= commitIndex; i++ {
+			// rf.mu.Lock()
+			// DPrintf("term %d id %d sending log %v at index %d to service", rf.currentTerm, rf.me, rf.log[i].Command, i)
+			// rf.mu.Unlock()
+
 			msg := ApplyMsg{true, rf.log[i].Command, i}
 			rf.applyCh <- msg
 		}
-		rf.mu.Unlock()
+
+		lastCommit = commitIndex
+
+		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
