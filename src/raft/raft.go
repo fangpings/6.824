@@ -175,11 +175,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// DPrintf("term %d id %d getting vote request from %d whose term is %d", rf.currentTerm, rf.me, args.CandidateID, args.Term)
+	DPrintf("term %d id %d getting vote request from %d whose term is %d", rf.currentTerm, rf.me, args.CandidateID, args.Term)
 	// leader 和 candidate在当前term肯定都投给自己了，不用像AppendEntry一样做很多检查
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.state = follower
 		rf.votedFor = -1
 		if rf.state != follower {
 			go rf.onBecomingFollower()
@@ -194,13 +193,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateID
 				rf.lastUpdate = time.Now()
-				// DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
+				DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
 				return
 			} else {
-				// DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
+				DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
 			}
 		} else {
-			// DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
+			DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
 		}
 	}
 	reply.VoteGranted = false
@@ -240,7 +239,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if rf.state == follower {
+		if rf.state != candidate {
 			return
 		}
 		if reply.Term > rf.currentTerm {
@@ -283,7 +282,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 如果当前状态是candidate，那么有两种情况，第一种情况是当前term有人选成leader了，这个时候直接变成follower（不要更新votedFor和term），第二种情况是收到term更高的leader了，这个时候直接变成follower
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.state = follower
+		// rf.state = follower
 		rf.votedFor = -1
 		if rf.state != follower {
 			go rf.onBecomingFollower()
@@ -332,7 +331,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendAppendEntries(server int) {
 	for {
 		rf.mu.Lock()
-		if rf.state == follower {
+		if rf.state != leader {
 			rf.mu.Unlock()
 			return
 		}
@@ -350,7 +349,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// so they will receive the reply and continue to communicate with followers
 			// but its term has been updated by that goroutine who first detects this
 			// so other goroutines cannot quit properly and will continue to decrease nextIndex until it reaches 0
-			if rf.state == follower {
+			if rf.state != leader {
 				rf.mu.Unlock()
 				return
 			}
@@ -399,7 +398,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	if rf.state == leader {
 		rf.log = append(rf.log, logEntry{command, rf.currentTerm})
-		DPrintf("term %d id %d receiving log %v from client, will be appended to %d", rf.currentTerm, rf.me, command, len(rf.log)-1)
+		DPrintf("term %d id %d receiving log %v at %d, current log %v", rf.currentTerm, rf.me, command, len(rf.log)-1, rf.log)
 	}
 
 	return len(rf.log) - 1, rf.currentTerm, rf.state == leader
@@ -455,7 +454,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) onBecomingFollower() {
 	rf.mu.Lock()
-	// DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
+	DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
 	rf.state = follower
 	rf.lastUpdate = time.Now()
 	rf.mu.Unlock()
@@ -478,7 +477,7 @@ func (rf *Raft) onBecomingFollower() {
 
 func (rf *Raft) onBecomingCandidate() {
 	rf.mu.Lock()
-	// DPrintf("term %d id %d becoming candidate", rf.currentTerm, rf.me)
+	DPrintf("term %d id %d becoming candidate", rf.currentTerm, rf.me)
 	rf.state = candidate
 	rf.mu.Unlock()
 
@@ -540,7 +539,7 @@ func (rf *Raft) onBecomingCandidate() {
 			rf.mu.Unlock()
 			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
-		// DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
+		DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
 	}
 }
 
@@ -557,7 +556,7 @@ func (rf *Raft) onBecomingLeader() {
 
 	for {
 		rf.mu.Lock()
-		if rf.state == follower {
+		if rf.state != leader {
 			rf.mu.Unlock()
 			return
 		}
