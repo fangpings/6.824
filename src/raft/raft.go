@@ -21,6 +21,8 @@ package raft
 // import "labrpc"
 
 import (
+	"bytes"
+	"labgob"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -78,6 +80,7 @@ type Raft struct {
 
 	// volatile for all states
 	commitIndex int
+	lastApplied int
 
 	//volatile for leader only
 	nextIndex  []int
@@ -115,12 +118,18 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	// persist doesn't need locks, MAKE SURE that this method is called only within critical region
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -132,17 +141,32 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []logEntry
+
+	if e := d.Decode(&currentTerm); e != nil {
+		DPrintf("FATAL DECODE ERROR %s", e)
+		return
+	}
+	rf.currentTerm = currentTerm
+
+	if e := d.Decode(&votedFor); e != nil {
+		DPrintf("FATAL DECODE ERROR %s", e)
+		return
+	}
+	rf.votedFor = votedFor
+
+	if e := d.Decode(&log); e != nil {
+		DPrintf("FATAL DECODE ERROR %s", e)
+		return
+	}
+	rf.log = log
 }
 
 //
@@ -174,8 +198,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
-	DPrintf("term %d id %d getting vote request from %d whose term is %d", rf.currentTerm, rf.me, args.CandidateID, args.Term)
+	// DPrintf("term %d id %d getting vote request from %d whose term is %d", rf.currentTerm, rf.me, args.CandidateID, args.Term)
 	// leader 和 candidate在当前term肯定都投给自己了，不用像AppendEntry一样做很多检查
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -193,13 +218,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateID
 				rf.lastUpdate = time.Now()
-				DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
+				// DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
 				return
 			} else {
-				DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
+				// DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
 			}
 		} else {
-			DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
+			// DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
 		}
 	}
 	reply.VoteGranted = false
@@ -239,7 +264,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if rf.state != candidate {
+		if rf.state != candidate || reply.Term < rf.currentTerm || args.Term < rf.currentTerm {
 			return
 		}
 		if reply.Term > rf.currentTerm {
@@ -273,6 +298,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	rf.lastUpdate = time.Now()
 	// DPrintf("term %d id %d state %d receiving update from %d whose term %d", rf.currentTerm, rf.me, rf.state, args.LeaderId, args.Term)
@@ -305,7 +331,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.Entries) > 0 {
 		DPrintf("term %d id %d log to be appended %v", rf.currentTerm, rf.me, args.Entries)
 	}
-	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+
+	// if log contains all the entries that leader sent, we should not truncate it
+	// because we might drop the entires that follows
+	// 但这一条的修改的效果不明显
+	if len(rf.log)-1 < args.PrevLogIndex+len(args.Entries) || (len(args.Entries) > 0 && rf.log[args.PrevLogIndex+len(args.Entries)].Term != args.Entries[len(args.Entries)-1].Term) {
+		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	}
+	// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 
 	// TODO: the advice says applyCh could congest
 	// so the better way to do this is to send commit message
@@ -349,7 +382,8 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// so they will receive the reply and continue to communicate with followers
 			// but its term has been updated by that goroutine who first detects this
 			// so other goroutines cannot quit properly and will continue to decrease nextIndex until it reaches 0
-			if rf.state != leader {
+			// 如果rep的term已经落后了，那么我们不应该继续了,但是这一条似乎没有显示出效果
+			if rf.state != leader || rep.Term < rf.currentTerm || req.Term < rf.currentTerm {
 				rf.mu.Unlock()
 				return
 			}
@@ -367,7 +401,13 @@ func (rf *Raft) sendAppendEntries(server int) {
 				rf.mu.Unlock()
 				return
 			}
-			rf.nextIndex[server]--
+
+			// it turns out that is protection is most useful
+			// but I don't like this one
+			// it's not beautiful
+			if rf.nextIndex[server] >= 2 {
+				rf.nextIndex[server]--
+			}
 			rf.mu.Unlock()
 		}
 		time.Sleep(time.Duration(10) * time.Millisecond)
@@ -398,6 +438,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	if rf.state == leader {
 		rf.log = append(rf.log, logEntry{command, rf.currentTerm})
+		rf.persist()
 		DPrintf("term %d id %d receiving log %v at %d, current log %v", rf.currentTerm, rf.me, command, len(rf.log)-1, rf.log)
 	}
 
@@ -457,6 +498,7 @@ func (rf *Raft) onBecomingFollower() {
 	DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
 	rf.state = follower
 	rf.lastUpdate = time.Now()
+	rf.persist()
 	rf.mu.Unlock()
 
 	for {
@@ -491,6 +533,7 @@ func (rf *Raft) onBecomingCandidate() {
 		}
 		rf.currentTerm++
 		rf.votedFor = rf.me
+		rf.persist()
 
 		// voteChan := make(chan int, rf.numPeers)
 		replies := make([]RequestVoteReply, rf.numPeers)
@@ -539,7 +582,7 @@ func (rf *Raft) onBecomingCandidate() {
 			rf.mu.Unlock()
 			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
-		DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
+		// DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
 	}
 }
 
@@ -576,6 +619,9 @@ func (rf *Raft) onBecomingLeader() {
 		lastCommit := rf.commitIndex + 1 // only for debugging
 
 		for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+			if rf.log[i].Term != rf.currentTerm {
+				continue
+			}
 			count := 1
 			for j := 0; j < rf.numPeers; j++ {
 				if j == rf.me {
@@ -585,11 +631,17 @@ func (rf *Raft) onBecomingLeader() {
 					count++
 				}
 			}
+
+			// A leader is not allowed to update commitIndex to somewhere in a previous term
+			//(or, for that matter, a future term).
+			// Thus, as the rule says, you specifically need to check that log[N].term == currentTerm.
+			// This is because Raft leaders cannot be sure an entry is actually committed (and will not ever be changed in the future)
+			// if it’s not from their current term. This is illustrated by Figure 8 in the paper.
+
 			if count >= rf.majority {
 				rf.commitIndex = i
 			}
 		}
-
 		for i := lastCommit; i <= rf.commitIndex; i++ {
 			DPrintf("term %d id %d log %v leader commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
 		}
@@ -598,11 +650,10 @@ func (rf *Raft) onBecomingLeader() {
 }
 
 func (rf *Raft) checkingCommit() {
-	lastCommit := 0
 	for {
 		commitIndex := rf.commitIndex
 
-		for i := lastCommit + 1; i <= commitIndex; i++ {
+		for i := rf.lastApplied + 1; i <= commitIndex; i++ {
 			// rf.mu.Lock()
 			// DPrintf("term %d id %d sending log %v at index %d to service", rf.currentTerm, rf.me, rf.log[i].Command, i)
 			// rf.mu.Unlock()
@@ -611,7 +662,7 @@ func (rf *Raft) checkingCommit() {
 			rf.applyCh <- msg
 		}
 
-		lastCommit = commitIndex
+		rf.lastApplied = commitIndex
 
 		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
