@@ -53,6 +53,7 @@ const (
 	follower = iota
 	candidate
 	leader
+	killed
 )
 
 type logEntry struct {
@@ -259,12 +260,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, okChan chan int) {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+func (rf *Raft) sendRequestVote(server int, okChan chan int) {
+	rf.mu.Lock()
+	req := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
+	rf.mu.Unlock()
+	reply := &RequestVoteReply{}
+	ok := rf.peers[server].Call("Raft.RequestVote", req, reply)
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if rf.state != candidate || reply.Term < rf.currentTerm || args.Term < rf.currentTerm {
+		if rf.state != candidate || reply.Term < rf.currentTerm || req.Term < rf.currentTerm {
 			return
 		}
 		if reply.Term > rf.currentTerm {
@@ -453,6 +458,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// this is for sequential testing
+	// sometimes some goroutines from previous tests are not killed thoroughly
+	rf.state = killed
 }
 
 //
@@ -504,6 +515,10 @@ func (rf *Raft) onBecomingFollower() {
 	for {
 		// DPrintf("follower %d checking, last update since %d", rf.me, time.Since(rf.lastUpdate))
 		rf.mu.Lock()
+		if rf.state != follower {
+			rf.mu.Unlock()
+			return
+		}
 		if time.Since(rf.lastUpdate) > rf.electionTimeout {
 			// DPrintf("term %d id %d timeout", rf.currentTerm, rf.me)
 			// DPrintf("term %d id %d time out, quitting follower", rf.currentTerm, rf.me)
@@ -526,7 +541,7 @@ func (rf *Raft) onBecomingCandidate() {
 	for {
 		rf.mu.Lock()
 		lastUpdate := time.Now()
-		if rf.state == follower {
+		if rf.state != candidate {
 			// DPrintf("term %d id %d quitting candidate 1", rf.currentTerm, rf.me)
 			rf.mu.Unlock()
 			return
@@ -534,9 +549,10 @@ func (rf *Raft) onBecomingCandidate() {
 		rf.currentTerm++
 		rf.votedFor = rf.me
 		rf.persist()
+		rf.mu.Unlock()
 
 		// voteChan := make(chan int, rf.numPeers)
-		replies := make([]RequestVoteReply, rf.numPeers)
+		// replies := make([]RequestVoteReply, rf.numPeers)
 		okChan := make(chan int, rf.numPeers)
 		for i := 0; i < rf.numPeers; i++ {
 			if i == rf.me {
@@ -544,14 +560,12 @@ func (rf *Raft) onBecomingCandidate() {
 			}
 			if rf.state == follower {
 				// DPrintf("term %d id %d quitting candidate 2", rf.currentTerm, rf.me)
-				rf.mu.Unlock()
 				return
 			}
 
-			req := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
-			go rf.sendRequestVote(i, req, &replies[i], okChan)
+			// req := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
+			go rf.sendRequestVote(i, okChan)
 		}
-		rf.mu.Unlock()
 
 		// we cannot just sleep the whole election timeout and count the vote
 		// because it will cause other followers who grant votes timeout and becomes candidate
@@ -651,6 +665,9 @@ func (rf *Raft) onBecomingLeader() {
 
 func (rf *Raft) checkingCommit() {
 	for {
+		if rf.state == killed {
+			return
+		}
 		commitIndex := rf.commitIndex
 
 		for i := rf.lastApplied + 1; i <= commitIndex; i++ {
