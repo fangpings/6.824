@@ -1,15 +1,16 @@
 package raftkv
 
-import "linearizability"
-
-import "testing"
-import "strconv"
-import "time"
-import "math/rand"
-import "log"
-import "strings"
-import "sync"
-import "sync/atomic"
+import (
+	"linearizability"
+	"log"
+	"math/rand"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -135,6 +136,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 				}
 			}
 		}
+		DPrintf("Current partition %v, %v", pa[0], pa[1])
 		cfg.partition(pa[0], pa[1])
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}

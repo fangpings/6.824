@@ -8,17 +8,20 @@ package raft
 // test with the original before submitting.
 //
 
-import "labrpc"
-import "log"
-import "sync"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"labrpc"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"testing"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -133,6 +136,7 @@ func (cfg *config) crash1(i int) {
 // this server. since we cannot really kill it.
 //
 func (cfg *config) start1(i int) {
+	DPrintf("ID %d RESTARTED", i)
 	cfg.crash1(i)
 
 	// a fresh set of outgoing ClientEnd names.
@@ -234,6 +238,7 @@ func (cfg *config) cleanup() {
 // attach server i to the net.
 func (cfg *config) connect(i int) {
 	// fmt.Printf("connect(%d)\n", i)
+	DPrintf("ID %d CONNECTED", i)
 
 	cfg.connected[i] = true
 
@@ -258,6 +263,7 @@ func (cfg *config) connect(i int) {
 func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
 
+	DPrintf("ID %d DISCONNECTED", i)
 	cfg.connected[i] = false
 
 	// outgoing ClientEnds
@@ -462,13 +468,13 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("one(%v) failed to reach agreement because command does not agree", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+	cfg.t.Fatalf("one(%v) failed to reach agreement because no one claimed to be leader", cmd)
 	return -1
 }
 

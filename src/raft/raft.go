@@ -333,9 +333,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 论文上说是确定match之后Append any new entries not already in the log
 	// 但是我们的操作是每次leader会发送从prevIndex到最新的所有log给follower
 	// 所以我们确定match之后从match的index直接覆盖所有就行了
-	if len(args.Entries) > 0 {
-		DPrintf("term %d id %d log to be appended %v", rf.currentTerm, rf.me, args.Entries)
-	}
+
+	// if len(args.Entries) > 0 {
+	// 	DPrintf("term %d id %d log to be appended %v", rf.currentTerm, rf.me, args.Entries)
+	// }
 
 	// if log contains all the entries that leader sent, we should not truncate it
 	// because we might drop the entires that follows
@@ -360,9 +361,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// just for debugging
 		for i := history; i <= rf.commitIndex; i++ {
-			DPrintf("term %d id %d log %v commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
+			// DPrintf("term %d id %d log %v commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
 		}
-		DPrintf("term %d id %d current log %v", rf.currentTerm, rf.me, rf.log)
+		// DPrintf("term %d id %d current log %v", rf.currentTerm, rf.me, rf.log)
 	}
 }
 
@@ -444,7 +445,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == leader {
 		rf.log = append(rf.log, logEntry{command, rf.currentTerm})
 		rf.persist()
-		DPrintf("term %d id %d receiving log %v at %d, current log %v", rf.currentTerm, rf.me, command, len(rf.log)-1, rf.log)
+		// DPrintf("term %d id %d receiving log %v at %d, current log %v", rf.currentTerm, rf.me, command, len(rf.log)-1, rf.log)
 	}
 
 	return len(rf.log) - 1, rf.currentTerm, rf.state == leader
@@ -506,7 +507,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) onBecomingFollower() {
 	rf.mu.Lock()
-	DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
+	// DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
 	rf.state = follower
 	rf.lastUpdate = time.Now()
 	rf.persist()
@@ -534,7 +535,7 @@ func (rf *Raft) onBecomingFollower() {
 
 func (rf *Raft) onBecomingCandidate() {
 	rf.mu.Lock()
-	DPrintf("term %d id %d becoming candidate", rf.currentTerm, rf.me)
+	// DPrintf("term %d id %d becoming candidate", rf.currentTerm, rf.me)
 	rf.state = candidate
 	rf.mu.Unlock()
 
@@ -657,7 +658,7 @@ func (rf *Raft) onBecomingLeader() {
 			}
 		}
 		for i := lastCommit; i <= rf.commitIndex; i++ {
-			DPrintf("term %d id %d log %v leader commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
+			// DPrintf("term %d id %d log %v leader commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
 		}
 		rf.mu.Unlock()
 	}
@@ -696,7 +697,8 @@ func (rf *Raft) reportingState() {
 		case leader:
 			DPrintf("term %d id %d in state leader", rf.currentTerm, rf.me)
 		}
+		DPrintf("term %d id %d current log %v", rf.currentTerm, rf.me, rf.log)
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(300) * time.Millisecond)
+		time.Sleep(time.Duration(500) * time.Millisecond)
 	}
 }

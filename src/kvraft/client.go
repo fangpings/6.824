@@ -1,13 +1,16 @@
 package raftkv
 
-import "labrpc"
-import "crypto/rand"
-import "math/big"
-
+import (
+	"crypto/rand"
+	"labrpc"
+	"math/big"
+	"time"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leader int
 }
 
 func nrand() int64 {
@@ -21,6 +24,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leader = 0
 	return ck
 }
 
@@ -39,7 +43,36 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	ID := nrand()
+	args := GetArgs{key, ID}
+	reply := GetReply{}
+	// DPrintf("Waiting for reponse from %d", ck.leader)
+	ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
+	// DPrintf("Reponse confirmed from %d", ck.leader)
+	if ok && !reply.WrongLeader {
+		if reply.Err == ErrNoKey {
+			return ""
+		}
+		return reply.Value
+	}
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			args := GetArgs{key, ID}
+			reply := GetReply{}
+			// DPrintf("Waiting for reponse from %d", i)
+			ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+			// DPrintf("Reponse confirmed from %d", i)
+			if ok && !reply.WrongLeader {
+				ck.leader = i
+				if reply.Err == ErrNoKey {
+					return ""
+				}
+				return reply.Value
+			}
+			// DPrintf("retrying")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 //
@@ -54,6 +87,29 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ID := nrand()
+	args := PutAppendArgs{key, value, op, ID}
+	reply := PutAppendReply{}
+	// DPrintf("Waiting for reponse from %d", ck.leader)
+	ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
+	// DPrintf("Reponse confirmed from %d", ck.leader)
+	if ok && !reply.WrongLeader {
+		return
+	}
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			args := PutAppendArgs{key, value, op, ID}
+			reply := PutAppendReply{}
+			// DPrintf("Waiting for reponse from %d", i)
+			ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+			// DPrintf("Reponse confirmed from %d", i)
+			if ok && !reply.WrongLeader {
+				return
+			}
+			// DPrintf("retrying")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
