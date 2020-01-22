@@ -26,7 +26,9 @@ type Op struct {
 	Key   string
 	Value string
 
-	ID int64
+	// ID int64
+	Identifier int64
+	Counter    int
 }
 
 type KVServer struct {
@@ -40,13 +42,16 @@ type KVServer struct {
 	// Your definitions here.
 	storage map[string]string
 	ops     map[int]chan Op
-	excuted map[int64]bool
-	term    int
+	// excuted     map[int64]bool
+	term        int
+	lastApplied map[int64]int
 }
 
 func (kv *KVServer) setDeamon() {
 	for msg := range kv.applyCh {
 		appliedOp := msg.Command.(Op) // type assertion for interface
+		appliedIdentifier := appliedOp.Identifier
+		appliedCounter := appliedOp.Counter
 		appliedIndex := msg.CommandIndex
 		kv.mu.Lock()
 		// 这里再检查一遍是因为提交到raft的log可能也有重复，会被apply两次，所以要检查是否已经提交过
@@ -57,10 +62,13 @@ func (kv *KVServer) setDeamon() {
 		// 3. 但是我们已经通知clerk重传了，clerk也会重新提交一份，kvserver并不会发现这一个op已经apply过，因为raft还未通知
 		// 4. 于是raft就提交了两遍相同的op
 		// 解决的方法也很简单粗暴，kvserver在apply的时候做一下检查，保证不要重复apply就好了
-		if _, ok := kv.excuted[appliedOp.ID]; !ok {
+		if _, ok := kv.lastApplied[appliedIdentifier]; !ok {
+			kv.lastApplied[appliedIdentifier] = appliedCounter - 1
+		}
+		if appliedCounter > kv.lastApplied[appliedIdentifier] {
 			if appliedOp.Op == "Put" {
 				kv.storage[appliedOp.Key] = appliedOp.Value
-				kv.excuted[appliedOp.ID] = true
+				// kv.excuted[appliedOp.ID] = true
 			} else if appliedOp.Op == "Append" {
 				val, ok := kv.storage[appliedOp.Key]
 				if ok {
@@ -68,8 +76,9 @@ func (kv *KVServer) setDeamon() {
 				} else {
 					kv.storage[appliedOp.Key] = appliedOp.Value
 				}
-				kv.excuted[appliedOp.ID] = true
+				// kv.excuted[appliedOp.ID] = true
 			}
+			kv.lastApplied[appliedIdentifier] = appliedCounter
 		}
 		DPrintf("Server %d, OP %v applied to state machine, current storage %v", kv.me, appliedOp, kv.storage)
 
@@ -93,7 +102,7 @@ func (kv *KVServer) checkTerm() {
 		term, _ := kv.rf.GetState()
 		if term != kv.term {
 			kv.term = term
-			msg := Op{ID: -1}
+			msg := Op{Identifier: -1}
 			for key, ch := range kv.ops {
 				ch <- msg
 				delete(kv.ops, key)
@@ -108,8 +117,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	listenCh := make(chan Op, 1)
-	ID := args.ID
-	op := Op{"Get", args.Key, "", ID}
+	// ID := args.ID
+	op := Op{"Get", args.Key, "", args.Identifier, args.Counter}
 	index, _, isLeader := kv.rf.Start(op)
 	kv.ops[index] = listenCh
 
@@ -127,14 +136,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// 本质上我们只在意某一条提交的op是不是永远不会被commit了
 	// 能确认这一点的就是本该出现在某一位置的这个op被另一个op占了
 	// 所以我们就等着就行了
-	DPrintf("Server %d, OP %d submmitted to Raft", kv.me, op.ID%100)
+	// DPrintf("Server %d, OP %d submmitted to Raft", kv.me, op.ID%100)
 	kv.mu.Unlock()
 	appliedOp := <-listenCh
-	if appliedOp.ID != ID {
-		DPrintf("Server %d, OP %d applied differs from op %d submmitted", kv.me, appliedOp.ID%100, op.ID%100)
+	if appliedOp.Identifier != args.Identifier || appliedOp.Counter != args.Counter {
+		// DPrintf("Server %d, OP %d applied differs from op %d submmitted", kv.me, appliedOp.ID%100, op.ID%100)
 		reply.WrongLeader = true
 	} else {
-		DPrintf("Server %d, OP %d commitment confirmed", kv.me, op.ID%100)
+		// DPrintf("Server %d, OP %d commitment confirmed", kv.me, op.ID%100)
 		reply.WrongLeader = false
 		kv.mu.Lock()
 		val, ok := kv.storage[appliedOp.Key]
@@ -152,15 +161,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
 	listenCh := make(chan Op, 1)
-	ID := args.ID
-	if _, ok := kv.excuted[ID]; ok {
-		DPrintf("Server %d, op ID %d has been excuted", kv.me, ID)
+	// ID := args.ID
+	if _, ok := kv.lastApplied[args.Identifier]; ok && args.Counter < kv.lastApplied[args.Identifier] {
+		// DPrintf("Server %d, op ID %d has been excuted", kv.me, ID)
 		reply.WrongLeader = false
 		reply.Err = OK
 		kv.mu.Unlock()
 		return
 	}
-	op := Op{args.Op, args.Key, args.Value, ID}
+	op := Op{args.Op, args.Key, args.Value, args.Identifier, args.Counter}
 	index, _, isLeader := kv.rf.Start(op)
 	kv.ops[index] = listenCh
 	kv.mu.Unlock()
@@ -170,13 +179,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	DPrintf("Server %d, OP %d submmitted to Raft", kv.me, op.ID%100)
+	// DPrintf("Server %d, OP %d submmitted to Raft", kv.me, op.ID%100)
 	appliedOp := <-listenCh
-	if appliedOp.ID != ID {
-		DPrintf("Server %d, OP %d applied differs from op %d submmitted", kv.me, appliedOp.ID%100, op.ID%100)
+	if appliedOp.Identifier != args.Identifier || appliedOp.Counter != args.Counter {
+		// DPrintf("Server %d, OP %d applied differs from op %d submmitted", kv.me, appliedOp.ID%100, op.ID%100)
 		reply.WrongLeader = true
 	} else {
-		DPrintf("Server %d, OP %d commitment confirmed", kv.me, op.ID%100)
+		// DPrintf("Server %d, OP %d commitment confirmed", kv.me, op.ID%100)
 		reply.WrongLeader = false
 		reply.Err = OK
 	}
@@ -223,7 +232,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.storage = map[string]string{}
 	kv.ops = map[int]chan Op{}
-	kv.excuted = map[int64]bool{}
+	// kv.excuted = map[int64]bool{}
+	kv.lastApplied = map[int64]int{}
 	kv.term = 0
 	go kv.setDeamon()
 	go kv.checkTerm()

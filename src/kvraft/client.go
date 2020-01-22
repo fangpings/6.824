@@ -10,7 +10,9 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader int
+	leader     int
+	identifier int64
+	counter    int
 }
 
 func nrand() int64 {
@@ -25,6 +27,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leader = 0
+	ck.identifier = nrand()
+	ck.counter = -1
 	return ck
 }
 
@@ -43,8 +47,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	ID := nrand()
-	args := GetArgs{key, ID}
+	// ID := nrand()
+	ck.counter++
+	args := GetArgs{key, ck.identifier, ck.counter}
 	reply := GetReply{}
 	// DPrintf("Waiting for reponse from %d", ck.leader)
 	ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
@@ -57,7 +62,7 @@ func (ck *Clerk) Get(key string) string {
 	}
 	for {
 		for i := 0; i < len(ck.servers); i++ {
-			args := GetArgs{key, ID}
+			args := GetArgs{key, ck.identifier, ck.counter}
 			reply := GetReply{}
 			// DPrintf("Waiting for reponse from %d", i)
 			ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
@@ -87,8 +92,9 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	ID := nrand()
-	args := PutAppendArgs{key, value, op, ID}
+	// ID := nrand()
+	ck.counter++
+	args := PutAppendArgs{key, value, op, ck.identifier, ck.counter}
 	reply := PutAppendReply{}
 	// DPrintf("Waiting for reponse from %d", ck.leader)
 	ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
@@ -98,7 +104,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	for {
 		for i := 0; i < len(ck.servers); i++ {
-			args := PutAppendArgs{key, value, op, ID}
+			args := PutAppendArgs{key, value, op, ck.identifier, ck.counter}
 			reply := PutAppendReply{}
 			// DPrintf("Waiting for reponse from %d", i)
 			ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
