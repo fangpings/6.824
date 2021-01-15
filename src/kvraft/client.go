@@ -10,9 +10,9 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader     int
-	identifier int64
-	counter    int
+	leader             int
+	identifier         int64
+	lastAppliedOpIndex int
 }
 
 func nrand() int64 {
@@ -28,7 +28,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.leader = 0
 	ck.identifier = nrand()
-	ck.counter = -1
+	ck.lastAppliedOpIndex = -1
 	return ck
 }
 
@@ -48,8 +48,8 @@ func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
 	// ID := nrand()
-	ck.counter++
-	args := GetArgs{key, ck.identifier, ck.counter}
+	ck.lastAppliedOpIndex++
+	args := GetArgs{key, ck.identifier, ck.lastAppliedOpIndex}
 	reply := GetReply{}
 	// DPrintf("Waiting for reponse from %d", ck.leader)
 	ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
@@ -62,12 +62,12 @@ func (ck *Clerk) Get(key string) string {
 	}
 	for {
 		for i := 0; i < len(ck.servers); i++ {
-			args := GetArgs{key, ck.identifier, ck.counter}
+			args := GetArgs{key, ck.identifier, ck.lastAppliedOpIndex}
 			reply := GetReply{}
 			// DPrintf("Waiting for reponse from %d", i)
 			ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 			// DPrintf("Reponse confirmed from %d", i)
-			if ok && !reply.WrongLeader {
+			if ok && !reply.WrongLeader { 
 				ck.leader = i
 				if reply.Err == ErrNoKey {
 					return ""
@@ -93,8 +93,8 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	// ID := nrand()
-	ck.counter++
-	args := PutAppendArgs{key, value, op, ck.identifier, ck.counter}
+	ck.lastAppliedOpIndex++
+	args := PutAppendArgs{key, value, op, ck.identifier, ck.lastAppliedOpIndex}
 	reply := PutAppendReply{}
 	// DPrintf("Waiting for reponse from %d", ck.leader)
 	ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
@@ -104,7 +104,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	for {
 		for i := 0; i < len(ck.servers); i++ {
-			args := PutAppendArgs{key, value, op, ck.identifier, ck.counter}
+			args := PutAppendArgs{key, value, op, ck.identifier, ck.lastAppliedOpIndex}
 			reply := PutAppendReply{}
 			// DPrintf("Waiting for reponse from %d", i)
 			ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
