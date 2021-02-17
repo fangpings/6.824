@@ -93,7 +93,7 @@ func (kv *KVServer) checkApplyCh() {
 			if _, ok := kv.lastClerkAppliedOpIndex[clerkIdentifier]; !ok {
 				kv.lastClerkAppliedOpIndex[clerkIdentifier] = clerkOpIndex - 1
 			}
-			DPrintf("Server %d lastRaftAppliedLogIndex %d raftLogAppliedIndex %d", kv.me, kv.lastRaftAppliedLogIndex, raftLogAppliedIndex)
+			// DPrintf("Server %d lastRaftAppliedLogIndex %d raftLogAppliedIndex %d", kv.me, kv.lastRaftAppliedLogIndex, raftLogAppliedIndex)
 			if kv.lastRaftAppliedLogIndex == raftLogAppliedIndex-1 {
 				if clerkOpIndex > kv.lastClerkAppliedOpIndex[clerkIdentifier] {
 					if command.Op == "Put" {
@@ -109,8 +109,10 @@ func (kv *KVServer) checkApplyCh() {
 					kv.lastClerkAppliedOpIndex[clerkIdentifier] = clerkOpIndex
 				}
 				kv.lastRaftAppliedLogIndex = raftLogAppliedIndex
+				// kv.checkStateSize()
 				// DPrintf("Server %d, OP %v applied to state machine, current storage %v", kv.me, command, kv.storage)
 			} else {
+				kv.rf.SetLastApplied(kv.lastRaftAppliedLogIndex)
 				DPrintf("Server %d, OP %v not applied to state machine", kv.me, command)
 			}
 
@@ -120,7 +122,9 @@ func (kv *KVServer) checkApplyCh() {
 			}
 			kv.releaseLock("checkApplyCh")
 		case raft.InstallSnapshotMsg:
+			kv.acquireLock()
 			kv.installSnapshot(command.Data)
+			kv.releaseLock("installSnapshot")
 		}
 	}
 }
@@ -168,7 +172,7 @@ func (kv *KVServer) checkStateSize() {
 			kv.releaseLock("checkStateSize")
 			kv.rf.Snapshot(data, kv.lastRaftAppliedLogIndex)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -177,8 +181,8 @@ func (kv *KVServer) installSnapshot(data []byte) {
 		return
 	}
 
-	kv.acquireLock()
-	defer kv.releaseLock("installSnapshot")
+	// kv.acquireLock()
+	// defer kv.releaseLock("installSnapshot")
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
@@ -204,12 +208,12 @@ func (kv *KVServer) installSnapshot(data []byte) {
 	}
 	kv.lastRaftAppliedLogIndex = lastAppliedIndex
 
-	for key, ch := range kv.opApplyCh {
-		msg := Op{ClerkIdentifier: -1}
-		ch <- msg
-		delete(kv.opApplyCh, key)
-	}
-	DPrintf("Server %d receive snapshot, content %v, lastAppliedID %d, lastAppliedIndex %d", kv.me, storage, lastAppliedID, lastAppliedIndex)
+	// for key, ch := range kv.opApplyCh {
+	// 	msg := Op{ClerkIdentifier: -1}
+	// 	ch <- msg
+	// 	delete(kv.opApplyCh, key)
+	// }
+	// DPrintf("Server %d receive snapshot, content %v, lastAppliedID %d, lastAppliedIndex %d", kv.me, storage, lastAppliedID, lastAppliedIndex)
 	kv.rf.SetLastApplied(kv.lastRaftAppliedLogIndex)
 }
 
