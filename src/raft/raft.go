@@ -139,7 +139,7 @@ func (rf *Raft) Snapshot(snapshot []byte, lastAppliedIndex int) {
 	rf.acquireLock()
 	defer rf.releaseLock("Snapshot")
 
-	DPrintf("term %d id %d last applied index: %d, last snapshot index: %d, last log: %d", rf.currentTerm, rf.me, lastAppliedIndex, rf.lastIncludedIndex, rf.lastTotalLogIndex())
+	// DPrintf("term %d id %d last applied index: %d, last snapshot index: %d, last log: %d", rf.currentTerm, rf.me, lastAppliedIndex, rf.lastIncludedIndex, rf.lastTotalLogIndex())
 	// total log:      0 1 2 3(last included) | 4 5 6 (last applied) 7 8
 	// current log:                           | 0 1 2                3 4
 	// we need to keep last applied log, otherwise we might have empty log, which will incur some problem
@@ -149,11 +149,14 @@ func (rf *Raft) Snapshot(snapshot []byte, lastAppliedIndex int) {
 	rf.lastIncludedTerm = rf.getLogTermByTotalIndex(lastAppliedIndex)
 	rf.log = rf.log[lastAppliedIndex-rf.lastIncludedIndex:] // we have to keep last log entry
 	rf.lastIncludedIndex = lastAppliedIndex
-	if rf.lastApplied < lastAppliedIndex {
-		rf.lastApplied = lastAppliedIndex
-	}
+	// if rf.lastApplied < lastAppliedIndex {
+	// 	rf.lastApplied = lastAppliedIndex
+	// }
 	logData := rf.makePersistData()
 	rf.persister.SaveStateAndSnapshot(logData, snapshot)
+	if (rf.commitIndex > rf.lastTotalLogIndex()) {
+		DPrintf("term %d id %d commit index %d leads current log %d b", rf.currentTerm, rf.me, rf.commitIndex, rf.lastTotalLogIndex())
+	}
 }
 
 //
@@ -170,7 +173,8 @@ func (rf *Raft) makePersistData() (data []byte) {
 	e.Encode(rf.log)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
-	e.Encode(rf.commitIndex)
+	// e.Encode(rf.commitIndex)
+	// e.Encode(rf.lastApplied)
 	return w.Bytes()
 }
 func (rf *Raft) persist() {
@@ -203,7 +207,8 @@ func (rf *Raft) readPersist(data []byte) {
 	var log []logEntry
 	var lastIncludedIndex int
 	var lastIncludedTerm int
-	var commitIndex int
+	// var commitIndex int
+	// var lastApplied int
 
 	if e := d.Decode(&currentTerm); e != nil {
 		DPrintf("FATAL DECODE ERROR %s", e)
@@ -241,11 +246,17 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	rf.lastIncludedTerm = lastIncludedTerm
 
-	if e := d.Decode(&commitIndex); e != nil {
-		DPrintf("FATAL DECODE ERROR %s", e)
-		return
-	}
-	rf.commitIndex = commitIndex
+	// if e := d.Decode(&commitIndex); e != nil {
+	// 	DPrintf("FATAL DECODE ERROR %s", e)
+	// 	return
+	// }
+	// rf.commitIndex = commitIndex
+
+	// if e := d.Decode(&lastApplied); e != nil {
+	// 	DPrintf("FATAL DECODE ERROR %s", e)
+	// 	return
+	// }
+	// rf.lastApplied = lastApplied
 }
 
 type InstallSnapshotArgs struct {
@@ -278,10 +289,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.releaseLock("InstallSnapshot-1")
 		return
 	}
+	if rf.state == leader {
+		DPrintf("LEADER RECEIVE SNAPSHOT!!!")
+	}
 
 	// we have to keep this snapshot anyways
-	logData := rf.makePersistData()
-	rf.persister.SaveStateAndSnapshot(logData, args.Data)
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 
@@ -295,21 +307,30 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		} else {
 			rf.log = rf.log[correspondingIndex:]
 		}
+		if (rf.commitIndex > rf.lastTotalLogIndex()) {
+			DPrintf("term %d id %d commit index %d leads current log %d c", rf.currentTerm, rf.me, rf.commitIndex, rf.lastTotalLogIndex())
+		}
+		rf.persist()
 		rf.releaseLock("InstallSnapshot-2")
 		return
 	}
-	DPrintf("term %d id %d last applied index %d set to %d a", rf.currentTerm, rf.me, rf.lastApplied, rf.lastIncludedIndex)
-	rf.lastApplied = rf.lastIncludedIndex
-	rf.commitIndex = rf.lastIncludedIndex
+	// DPrintf("term %d id %d last applied index %d set to %d a", rf.currentTerm, rf.me, rf.lastApplied, rf.lastIncludedIndex)
+	// rf.lastApplied = rf.lastIncludedIndex
+	// rf.commitIndex = rf.lastIncludedIndex
 	rf.log = make([]logEntry, 0)
 	msg := ApplyMsg{false, InstallSnapshotMsg{args.Data}, -1}
+	logData := rf.makePersistData()
+	rf.persister.SaveStateAndSnapshot(logData, args.Data)
+	if (rf.commitIndex > rf.lastTotalLogIndex()) {
+		DPrintf("term %d id %d commit index %d leads current log %d d", rf.currentTerm, rf.me, rf.commitIndex, rf.lastTotalLogIndex())
+	}
 	rf.releaseLock("InstallSnapshot-3")
 	// applyCh will block so lock must be released
 	rf.applyCh <- msg
 }
 
 func (rf *Raft) sendInstallSnapshot(server int) {
-	DPrintf("term %d id %d send install snapshot to sever %d", rf.currentTerm, rf.me, server)
+	// DPrintf("term %d id %d send install snapshot to sever %d", rf.currentTerm, rf.me, server)
 	for {
 		rf.acquireLock()
 		if rf.state != leader {
@@ -338,8 +359,12 @@ func (rf *Raft) sendInstallSnapshot(server int) {
 				return
 			}
 			// if send snapshot succeeded, we need to update as well
-			rf.nextIndex[server] = lastIncludedIndex + 1
-			rf.matchIndex[server] = lastIncludedIndex
+			if rf.nextIndex[server] < lastIncludedIndex+1 {
+				rf.nextIndex[server] = lastIncludedIndex + 1
+			}
+			// if rf.matchIndex[server] < lastIncludedIndex {
+			// 	rf.matchIndex[server] = lastIncludedIndex
+			// }
 			rf.mu.Unlock()
 			// not sure whether it's necessary or not
 			go rf.sendAppendEntries(server)
@@ -393,15 +418,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	if args.Term >= rf.currentTerm {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
-			if args.LastLogTerm > rf.getLastLogTerm() ||
+			if args.LastLogIndex >= rf.commitIndex {
+				if args.LastLogTerm > rf.getLastLogTerm() ||
 				(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.lastTotalLogIndex()) {
-				reply.VoteGranted = true
-				rf.votedFor = args.CandidateID
-				rf.lastUpdate = time.Now()
-				// DPrintf("term %d id %d vote grated to %d", rf.currentTerm, rf.me, args.CandidateID)
-				return
-			} else {
-				// DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
+					reply.VoteGranted = true
+					rf.votedFor = args.CandidateID
+					rf.lastUpdate = time.Now()
+					DPrintf("term %d id %d vote grated to %d, my last index %d term %d, his last index %d term %d", rf.currentTerm, rf.me, args.CandidateID, rf.lastTotalLogIndex(), rf.getLastLogTerm(), args.LastLogIndex, args.LastLogTerm)
+					return
+				} else {
+					// DPrintf("id %d vote not grated to %d because candidate log is out of date", rf.me, args.CandidateID)
+				}
 			}
 		} else {
 			// DPrintf("id %d vote not grated to %d because vote has been granted to %d", rf.me, args.CandidateID, rf.votedFor)
@@ -442,6 +469,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, okChan chan int) {
 	rf.mu.Lock()
 	req := &RequestVoteArgs{rf.currentTerm, rf.me, rf.lastTotalLogIndex(), rf.getLastLogTerm()}
+	DPrintf("term %d id %d sending request vote to %d request %v", rf.currentTerm, rf.me, server, req)
 	rf.mu.Unlock()
 	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", req, reply)
@@ -459,7 +487,7 @@ func (rf *Raft) sendRequestVote(server int, okChan chan int) {
 			return
 		}
 		if reply.VoteGranted {
-			// DPrintf("Getting vote from %d", index)
+			DPrintf("term %d id %d getting vote from %d", rf.currentTerm, rf.me, server)
 			okChan <- 1
 		}
 	}
@@ -533,8 +561,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.lastTotalLogIndex() < args.PrevLogIndex+len(args.Entries) ||
 		(len(args.Entries) > 0 &&
 			rf.getLogTermByTotalIndex(args.PrevLogIndex+len(args.Entries)) != args.Entries[len(args.Entries)-1].Term) {
+		// if rf.total2CurrentLogIndex(args.PrevLogIndex+1) < rf.commitIndex-1 {
+		// 	DPrintf("term %d id %d COMMITTED LOG WAS MODIFIED %d from %d term %d last commit %d", rf.currentTerm, rf.me, rf.total2CurrentLogIndex(args.PrevLogIndex+1), args.LeaderId, args.Term, rf.commitIndex)
+		// }
 		if rf.state == leader {
-			DPrintf("term %d id %d leader changes its log!!!", rf.currentTerm, rf.me)
+			DPrintf("LEADER CHANGES ITS LOG")
 		}
 		rf.log = append(rf.log[:rf.total2CurrentLogIndex(args.PrevLogIndex+1)], args.Entries...)
 	}
@@ -546,20 +577,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// commit index
 	if args.LeaderCommit > rf.commitIndex {
 		// doing the commit
-		// history := rf.commitIndex + 1 // just for debugging
-		if args.LeaderCommit > rf.lastTotalLogIndex() {
-			rf.commitIndex = rf.lastTotalLogIndex()
-		} else {
-			rf.commitIndex = args.LeaderCommit
-		}
+		history := rf.commitIndex // just for debugging
+		// if args.LeaderCommit > rf.lastTotalLogIndex() {
+		// 	rf.commitIndex = rf.lastTotalLogIndex()
+		// } else {
+		// 	rf.commitIndex = args.LeaderCommit
+		// }
+		rf.commitIndex = args.LeaderCommit
 		// DPrintf("id % d commit up since %v", rf.me, time.Since(rf.lastAppendTime))
 		// rf.lastAppendTime = time.Now()
 
 		// just for debugging
-		// for i := history; i <= rf.commitIndex; i++ {
-		// 	DPrintf("term %d id %d log %v commited to index %d", rf.currentTerm, rf.me, rf.log[i].Command, i)
+		// for i := history + 1; i <= rf.commitIndex; i++ {
+		// 	rf.persister.Log(i, rf.log[i], rf.me, "follower commit")
 		// }
-		// DPrintf("term %d id %d current log %v", rf.currentTerm, rf.me, rf.log)
+		DPrintf("term %d id %d follower commit log from %d to %d", rf.currentTerm, rf.me, history, rf.commitIndex)
+	}
+	if (rf.commitIndex > rf.lastTotalLogIndex()) {
+		DPrintf("term %d id %d commit index %d leads current log %d a", rf.currentTerm, rf.me, rf.commitIndex, rf.lastTotalLogIndex())
 	}
 }
 
@@ -587,11 +622,14 @@ func (rf *Raft) sendAppendEntries(server int) {
 			return
 		}
 		var entries []logEntry
-		DPrintf("term %d id %d next index %d last log %d", rf.currentTerm, rf.me, rf.nextIndex[server], rf.lastTotalLogIndex())
+		// DPrintf("term %d id %d next index %d last log %d", rf.currentTerm, rf.me, rf.nextIndex[server], rf.lastTotalLogIndex())
 		if len(rf.log) == 0 {
 			entries = rf.log
 		} else {
 			entries = rf.log[rf.total2CurrentLogIndex(rf.nextIndex[server]):]
+		}
+		if rf.commitIndex > rf.lastTotalLogIndex() {
+			DPrintf("term %d id %d looks like I missed some logs, commit %d last %d", rf.currentTerm, rf.me, rf.commitIndex, rf.lastTotalLogIndex())
 		}
 		req := &AppendEntriesArgs{
 			rf.currentTerm,
@@ -627,11 +665,16 @@ func (rf *Raft) sendAppendEntries(server int) {
 				return
 			}
 			if rep.Success {
-				rf.nextIndex[server] = lastIndex + 1
-				rf.matchIndex[server] = lastIndex
+				if lastIndex+1 > rf.nextIndex[server] {
+					rf.nextIndex[server] = lastIndex + 1
+				}
+				if lastIndex > rf.matchIndex[server] {
+					rf.matchIndex[server] = lastIndex
+				}
+				history := rf.commitIndex
 				for i := rf.commitIndex + 1; i <= rf.lastTotalLogIndex(); i++ {
 					// DPrintf("term %d id %d last commit index %d last included index %d", rf.currentTerm, rf.me, rf.commitIndex, rf.lastIncludedIndex)
-					if rf.getLogTermByTotalIndex(i) != rf.currentTerm {
+					if i < rf.lastIncludedIndex || rf.getLogTermByTotalIndex(i) != rf.currentTerm {
 						continue
 					}
 					count := 1
@@ -654,12 +697,19 @@ func (rf *Raft) sendAppendEntries(server int) {
 						rf.commitIndex = i
 					}
 				}
+				if history != rf.commitIndex {
+					DPrintf("term %d id %d leader commit log from %d to %d", rf.currentTerm, rf.me, history, rf.commitIndex)
+				}
+				// for j := history + 1; j <= rf.commitIndex; j++ {
+				// 	rf.persister.Log(j, rf.log[j], rf.me, "follower commit")
+				// }
 				rf.mu.Unlock()
 				return
 			}
 
 			if rf.nextIndex[server] >= 1 {
 				rf.nextIndex[server]--
+				// DPrintf("term %d id %d setting server %d next index to %d", rf.currentTerm, rf.me, server, rf.nextIndex[server])
 			}
 			rf.mu.Unlock()
 		}
@@ -698,7 +748,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			}
 			go rf.sendAppendEntries(i)
 		}
-		DPrintf("term %d id %d receiving log %v at %d", rf.currentTerm, rf.me, command, len(rf.log)-1)
+		DPrintf("term %d id %d receiving log %v at %d", rf.currentTerm, rf.me, command, rf.lastTotalLogIndex())
 	}
 
 	return rf.lastTotalLogIndex(), rf.currentTerm, rf.state == leader
@@ -748,6 +798,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedIndex = -1
 	rf.lastIncludedTerm = -1
 	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.log = make([]logEntry, 1)
 	rf.log[0] = logEntry{"", -1}
 
@@ -756,7 +807,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.onBecomingFollower()
 	go rf.checkingCommit()
-	go rf.reportingState()
+	// go rf.reportingState()
 
 	rf.lastAppendTime = time.Now()
 
@@ -765,7 +816,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) onBecomingFollower() {
 	rf.mu.Lock()
-	DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
+	// DPrintf("term %d id %d becoming follower", rf.currentTerm, rf.me)
 	rf.state = follower
 	rf.lastUpdate = time.Now()
 	rf.persist()
@@ -795,12 +846,13 @@ func (rf *Raft) onBecomingCandidate() {
 	rf.state = candidate
 
 	for {
-		lastUpdate := time.Now()
+		// lastUpdate := time.Now()
+		rf.mu.Lock()
 		if rf.state != candidate {
+			rf.mu.Unlock()
 			// DPrintf("term %d id %d quitting candidate 1", rf.currentTerm, rf.me)
 			return
 		}
-		rf.mu.Lock()
 		rf.currentTerm++
 		rf.votedFor = rf.me
 		rf.persist()
@@ -813,10 +865,10 @@ func (rf *Raft) onBecomingCandidate() {
 			if i == rf.me {
 				continue
 			}
-			if rf.state == follower {
-				// DPrintf("term %d id %d quitting candidate 2", rf.currentTerm, rf.me)
-				return
-			}
+			// if rf.state == follower {
+			// 	// DPrintf("term %d id %d quitting candidate 2", rf.currentTerm, rf.me)
+			// 	return
+			// }
 
 			// req := &RequestVoteArgs{rf.currentTerm, rf.me, len(rf.log) - 1, rf.log[len(rf.log)-1].Term}
 			go rf.sendRequestVote(i, okChan)
@@ -824,28 +876,46 @@ func (rf *Raft) onBecomingCandidate() {
 
 		// we cannot just sleep the whole election timeout and count the vote
 		// because it will cause other followers who grant votes timeout and becomes candidate
-		count := 1
-		for {
-			if rf.state == follower {
-				// DPrintf("term %d id %d quitting candidate 3(state changes)", rf.currentTerm, rf.me)
-				return
+		func(okChan chan int) {
+			count := 1
+			for {
+				select {
+				case <-okChan:
+					rf.mu.Lock()
+					count++
+					if count >= rf.majority && rf.state == candidate {
+						// DPrintf("term %d id %d getting %d votes, becoming leader", rf.currentTerm, rf.me, count)
+						rf.mu.Unlock()
+						go rf.onBecomingLeader()
+						return
+					}
+					rf.mu.Unlock()
+				case <-time.After(rf.electionTimeout):
+					return
+				}
 			}
-			select {
-			case <-okChan:
-				count++
-			default:
-				break
-			}
-			if count >= rf.majority {
-				// DPrintf("term %d id %d getting %d votes, becoming leader", rf.currentTerm, rf.me, count)
-				go rf.onBecomingLeader()
-				return
-			}
-			if time.Since(lastUpdate) > rf.electionTimeout {
-				break
-			}
-			time.Sleep(time.Duration(10) * time.Millisecond)
-		}
+		}(okChan)
+		// for {
+		// 	if rf.state == follower {
+		// 		// DPrintf("term %d id %d quitting candidate 3(state changes)", rf.currentTerm, rf.me)
+		// 		return
+		// 	}
+		// 	select {
+		// 	case <-okChan:
+		// 		count++
+		// 	default:
+		// 		break
+		// 	}
+		// 	if count >= rf.majority {
+		// 		// DPrintf("term %d id %d getting %d votes, becoming leader", rf.currentTerm, rf.me, count)
+		// 		go rf.onBecomingLeader()
+		// 		return
+		// 	}
+		// 	if time.Since(lastUpdate) > rf.electionTimeout {
+		// 		break
+		// 	}
+		// 	time.Sleep(time.Duration(10) * time.Millisecond)
+		// }
 		// DPrintf("term %d id %d candidate election timeout", rf.currentTerm, rf.me)
 	}
 }
@@ -897,16 +967,27 @@ func (rf *Raft) checkingCommit() {
 			return
 		}
 		rf.acquireLock()
-		if rf.lastApplied < rf.lastIncludedIndex || rf.lastApplied > rf.lastTotalLogIndex() {
-			time.Sleep(time.Duration(1) * time.Millisecond)
-			rf.releaseLock("checkingCommit")
-			continue
+		if rf.lastApplied < rf.lastIncludedIndex {
+			rf.lastApplied = rf.lastIncludedIndex
+		}
+		if rf.commitIndex < rf.lastApplied {
+			rf.commitIndex = rf.lastApplied
 		}
 		// DPrintf("term %d id %d last applied %d last commit %d last log %d", rf.currentTerm, rf.me, rf.lastApplied, rf.commitIndex, rf.lastTotalLogIndex())
+		// if rf.lastApplied < rf.lastIncludedIndex || rf.lastApplied > rf.lastTotalLogIndex() {
+		// 	DPrintf("term %d id %d skipping", rf.currentTerm, rf.me)
+		// 	rf.releaseLock("checkingCommit")
+		// 	time.Sleep(time.Duration(1) * time.Millisecond)
+		// 	continue
+		// }
 		msgs := make([]ApplyMsg, 0)
 		commitIndex := rf.commitIndex
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			// DPrintf("term %d id %d last applied index %d last included index %d commit index %d, trying to get log %d, log size %d", rf.currentTerm, rf.me, rf.lastApplied, rf.lastIncludedIndex, rf.commitIndex, rf.total2CurrentLogIndex(i), len(rf.log))
+			current := rf.total2CurrentLogIndex(i)
+			if current < 0 || current > len(rf.log)-1 {
+				break
+			}
 			msg := ApplyMsg{true, rf.log[rf.total2CurrentLogIndex(i)].Command, i}
 			msgs = append(msgs, msg)
 		}
@@ -926,12 +1007,31 @@ func (rf *Raft) checkingCommit() {
 }
 
 func (rf *Raft) SetLastApplied(lastApplied int) {
-	DPrintf("term %d id %d last applied index %d set to %d b", rf.currentTerm, rf.me, rf.lastApplied, lastApplied)
+	// DPrintf("term %d id %d last applied index %d set to %d b", rf.currentTerm, rf.me, rf.lastApplied, lastApplied)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.lastApplied = lastApplied
 	// rf.commitIndex = rf.lastApplied
 }
+
+// func (rf *Raft) Replay(index int) {
+// 	DPrintf("term %d id %d asking replay from %d to %d", rf.currentTerm, rf.me, index, rf.lastApplied)
+// 	rf.mu.Lock()
+// 	msgs := make([]ApplyMsg, 0)
+// 	for i := index + 1; i <= rf.lastApplied; i++ {
+// 		current := rf.total2CurrentLogIndex(i)
+// 		if i > len(rf.log)-1 || i < 0 {
+// 			rf.mu.Unlock()
+// 			return
+// 		}
+// 		msg := ApplyMsg{true, rf.log[current].Command, i}
+// 		msgs = append(msgs, msg)
+// 	}
+// 	rf.mu.Unlock()
+// 	for _, msg := range msgs {
+// 		rf.applyCh <- msg
+// 	}
+// }
 
 // when use these methods, make sure rf.lastIncludedIndex is unmodified
 func (rf *Raft) current2TotalLogIndex(currentIndex int) int {
@@ -974,6 +1074,6 @@ func (rf *Raft) reportingState() {
 		}
 		// DPrintf("term %d id %d current log %v current log %v", rf.currentTerm, rf.me, rf.log)
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(10) * time.Millisecond)
+		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
 }

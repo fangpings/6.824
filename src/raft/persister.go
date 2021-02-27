@@ -9,12 +9,15 @@ package raft
 // test with the original before submitting.
 //
 
-import "sync"
+import (
+	"sync"
+)
 
 type Persister struct {
 	mu        sync.Mutex
 	raftstate []byte
 	snapshot  []byte
+	appliedOp []interface{}
 }
 
 func MakePersister() *Persister {
@@ -27,6 +30,7 @@ func (ps *Persister) Copy() *Persister {
 	np := MakePersister()
 	np.raftstate = ps.raftstate
 	np.snapshot = ps.snapshot
+	np.appliedOp = ps.appliedOp
 	return np
 }
 
@@ -67,4 +71,40 @@ func (ps *Persister) SnapshotSize() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return len(ps.snapshot)
+}
+
+func (ps *Persister) Log(index int, op interface{}, server int, msg string, val string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if index-1 < len(ps.appliedOp) {
+		if ps.appliedOp[index-1] != op {
+			DPrintf("Server %d msg %v DIFFERENT LOG WAS APPLIED TO SAME POSITION %d, OLD %v, NEW %v, TOTAL %d", server, msg, index, ps.appliedOp[index-1], op, len(ps.appliedOp))
+		}
+		return
+	} else if index-1 > len(ps.appliedOp) {
+		DPrintf("Server %d msg %v MISSING SOME LOG index %d expected %d", server, msg, index, len(ps.appliedOp))
+		return
+	}
+	if val == "" {
+		DPrintf("Server %d appending op %v to log at %d", server, op, len(ps.appliedOp))
+	} else {
+		DPrintf("Server %d appending op %v to log at %d, response %s", server, op, len(ps.appliedOp), val)
+	}
+
+	ps.appliedOp = append(ps.appliedOp, op)
+}
+
+func (ps *Persister) GetAppliedOp() []interface{} {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.appliedOp
+}
+
+func (ps *Persister) SetAppliedOp(appliedOp []interface{}, server int) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for i := len(ps.appliedOp); i < len(appliedOp); i++ {
+		DPrintf("Server %d appending op %v to log at %d from snapshot", server, appliedOp[i], i)
+	}
+	ps.appliedOp = appliedOp
 }

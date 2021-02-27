@@ -136,7 +136,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 				}
 			}
 		}
-		DPrintf("Current partition %v, %v", pa[0], pa[1])
+		// DPrintf("Current partition %v, %v", pa[0], pa[1])
 		cfg.partition(pa[0], pa[1])
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}
@@ -354,7 +354,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 					out = linearizability.KvOutput{Value: v}
 				}
 				end := int64(time.Since(begin))
-				op := linearizability.Operation{Input: inp, Call: start, Output: out, Return: end}
+				op := linearizability.Operation{Input: inp, Call: start, Output: out, Return: end, ClientId: cli}
 				opMu.Lock()
 				operations = append(operations, op)
 				opMu.Unlock()
@@ -417,10 +417,12 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 
 	// log.Printf("Checking linearizability of %d operations", len(operations))
 	// start := time.Now()
-	ok := linearizability.CheckOperationsTimeout(linearizability.KvModel(), operations, linearizabilityCheckTimeout)
+	model := linearizability.KvModel()
+	res, info := linearizability.CheckOperationsVerbose(model, operations, 0)
+	linearizability.VisualizePath(model, info, "/Users/Kururuken/Desktop/6824/6.824/src/kvraft/linearizability.html")
 	// dur := time.Since(start)
 	// log.Printf("Linearizability check done in %s; result: %t", time.Since(start).String(), ok)
-	if !ok {
+	if res != linearizability.Ok {
 		t.Fatal("history is not linearizable")
 	}
 }

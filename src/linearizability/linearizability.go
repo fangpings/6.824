@@ -14,10 +14,16 @@ const (
 )
 
 type entry struct {
-	kind  entryKind
-	value interface{}
-	id    uint
-	time  int64
+	kind     entryKind
+	value    interface{}
+	id       int
+	time     int64
+	clientId int
+}
+
+type linearizationInfo struct {
+	history               [][]entry // for each partition, a list of entries
+	partialLinearizations [][][]int // for each partition, a set of histories (list of ids)
 }
 
 type byTime []entry
@@ -36,12 +42,12 @@ func (a byTime) Less(i, j int) bool {
 
 func makeEntries(history []Operation) []entry {
 	var entries []entry = nil
-	id := uint(0)
+	id := 0
 	for _, elem := range history {
 		entries = append(entries, entry{
-			callEntry, elem.Input, id, elem.Call})
+			callEntry, elem.Input, id, elem.Call, elem.ClientId})
 		entries = append(entries, entry{
-			returnEntry, elem.Output, id, elem.Return})
+			returnEntry, elem.Output, id, elem.Return, elem.ClientId})
 		id++
 	}
 	sort.Sort(byTime(entries))
@@ -51,7 +57,7 @@ func makeEntries(history []Operation) []entry {
 type node struct {
 	value interface{}
 	match *node // call if match is nil, otherwise return
-	id    uint
+	id    int
 	next  *node
 	prev  *node
 }
@@ -69,8 +75,8 @@ func insertBefore(n *node, mark *node) *node {
 	return n
 }
 
-func length(n *node) uint {
-	l := uint(0)
+func length(n *node) int {
+	l := 0
 	for n != nil {
 		n = n.next
 		l++
@@ -80,13 +86,13 @@ func length(n *node) uint {
 
 func renumber(events []Event) []Event {
 	var e []Event
-	m := make(map[uint]uint) // renumbering
-	id := uint(0)
+	m := make(map[int]int) // renumbering
+	id := 0
 	for _, v := range events {
 		if r, ok := m[v.Id]; ok {
-			e = append(e, Event{v.Kind, v.Value, r})
+			e = append(e, Event{v.ClientId, v.Kind, v.Value, r})
 		} else {
-			e = append(e, Event{v.Kind, v.Value, id})
+			e = append(e, Event{v.ClientId, v.Kind, v.Value, id})
 			m[v.Id] = id
 			id++
 		}
@@ -96,19 +102,20 @@ func renumber(events []Event) []Event {
 
 func convertEntries(events []Event) []entry {
 	var entries []entry
-	for _, elem := range events {
+	for i, elem := range events {
 		kind := callEntry
 		if elem.Kind == ReturnEvent {
 			kind = returnEntry
 		}
-		entries = append(entries, entry{kind, elem.Value, elem.Id, -1})
+		// use index as "time"
+		entries = append(entries, entry{kind, elem.Value, elem.Id, int64(i), elem.ClientId})
 	}
 	return entries
 }
 
 func makeLinkedEntries(entries []entry) *node {
 	var root *node = nil
-	match := make(map[uint]*node)
+	match := make(map[int]*node)
 	for i := len(entries) - 1; i >= 0; i-- {
 		elem := entries[i]
 		if elem.kind == returnEntry {
@@ -164,31 +171,33 @@ func unlift(entry *node) {
 	entry.next.prev = entry
 }
 
-func checkSingle(model Model, subhistory *node, kill *int32) bool {
-	n := length(subhistory) / 2
-	linearized := newBitset(n)
+func checkSingle(model Model, history []entry, computePartial bool, kill *int32) (bool, []*[]int) {
+	entry := makeLinkedEntries(history)
+	n := length(entry) / 2
+	linearized := newBitset(uint(n))
 	cache := make(map[uint64][]cacheEntry) // map from hash to cache entry
 	var calls []callsEntry
+	// longest linearizable prefix that includes the given entry
+	longest := make([]*[]int, n)
 
 	state := model.Init()
-	headEntry := insertBefore(&node{value: nil, match: nil, id: ^uint(0)}, subhistory)
-	entry := subhistory
+	headEntry := insertBefore(&node{value: nil, match: nil, id: -1}, entry)
 	for headEntry.next != nil {
 		if atomic.LoadInt32(kill) != 0 {
-			return false
+			return false, longest
 		}
 		if entry.match != nil {
 			matching := entry.match // the return entry
 			ok, newState := model.Step(state, entry.value, matching.value)
 			if ok {
-				newLinearized := linearized.clone().set(entry.id)
+				newLinearized := linearized.clone().set(uint(entry.id))
 				newCacheEntry := cacheEntry{newLinearized, newState}
 				if !cacheContains(model, cache, newCacheEntry) {
 					hash := newLinearized.hash()
 					cache[hash] = append(cache[hash], newCacheEntry)
 					calls = append(calls, callsEntry{entry, state})
 					state = newState
-					linearized.set(entry.id)
+					linearized.set(uint(entry.id))
 					lift(entry)
 					entry = headEntry.next
 				} else {
@@ -199,18 +208,43 @@ func checkSingle(model Model, subhistory *node, kill *int32) bool {
 			}
 		} else {
 			if len(calls) == 0 {
-				return false
+				return false, longest
+			}
+			// longest
+			if computePartial {
+				callsLen := len(calls)
+				var seq []int = nil
+				for _, v := range calls {
+					if longest[v.entry.id] == nil || callsLen > len(*longest[v.entry.id]) {
+						// create seq lazily
+						if seq == nil {
+							seq = make([]int, len(calls))
+							for i, v := range calls {
+								seq[i] = v.entry.id
+							}
+						}
+						longest[v.entry.id] = &seq
+					}
+				}
 			}
 			callsTop := calls[len(calls)-1]
 			entry = callsTop.entry
 			state = callsTop.state
-			linearized.clear(entry.id)
+			linearized.clear(uint(entry.id))
 			calls = calls[:len(calls)-1]
 			unlift(entry)
 			entry = entry.next
 		}
 	}
-	return true
+	// longest linearization is the complete linearization, which is calls
+	seq := make([]int, len(calls))
+	for i, v := range calls {
+		seq[i] = v.entry.id
+	}
+	for i := 0; i < n; i++ {
+		longest[i] = &seq
+	}
+	return true, longest
 }
 
 func fillDefault(model Model) Model {
@@ -223,26 +257,27 @@ func fillDefault(model Model) Model {
 	if model.Equal == nil {
 		model.Equal = ShallowEqual
 	}
+	if model.DescribeOperation == nil {
+		model.DescribeOperation = DefaultDescribeOperation
+	}
+	if model.DescribeState == nil {
+		model.DescribeState = DefaultDescribeState
+	}
 	return model
 }
 
-func CheckOperations(model Model, history []Operation) bool {
-	return CheckOperationsTimeout(model, history, 0)
-}
-
-// timeout = 0 means no timeout
-// if this operation times out, then a false positive is possible
-func CheckOperationsTimeout(model Model, history []Operation, timeout time.Duration) bool {
-	model = fillDefault(model)
-	partitions := model.Partition(history)
+func checkParallel(model Model, history [][]entry, computeInfo bool, timeout time.Duration) (CheckResult, linearizationInfo) {
 	ok := true
-	results := make(chan bool)
+	timedOut := false
+	results := make(chan bool, len(history))
+	longest := make([][]*[]int, len(history))
 	kill := int32(0)
-	for _, subhistory := range partitions {
-		l := makeLinkedEntries(makeEntries(subhistory))
-		go func() {
-			results <- checkSingle(model, l, &kill)
-		}()
+	for i, subhistory := range history {
+		go func(i int, subhistory []entry) {
+			ok, l := checkSingle(model, subhistory, computeInfo, &kill)
+			longest[i] = l
+			results <- ok
+		}(i, subhistory)
 	}
 	var timeoutChan <-chan time.Time
 	if timeout > 0 {
@@ -253,61 +288,81 @@ loop:
 	for {
 		select {
 		case result := <-results:
+			count++
 			ok = ok && result
-			if !ok {
+			if !ok && !computeInfo {
 				atomic.StoreInt32(&kill, 1)
 				break loop
 			}
-			count++
-			if count >= len(partitions) {
+			if count >= len(history) {
 				break loop
 			}
 		case <-timeoutChan:
+			timedOut = true
+			atomic.StoreInt32(&kill, 1)
 			break loop // if we time out, we might get a false positive
 		}
 	}
-	return ok
+	var info linearizationInfo
+	if computeInfo {
+		// make sure we've waited for all goroutines to finish,
+		// otherwise we might race on access to longest[]
+		for count < len(history) {
+			<-results
+			count++
+		}
+		// return longest linearizable prefixes that include each history element
+		partialLinearizations := make([][][]int, len(history))
+		for i := 0; i < len(history); i++ {
+			var partials [][]int
+			// turn longest into a set of unique linearizations
+			set := make(map[*[]int]struct{})
+			for _, v := range longest[i] {
+				if v != nil {
+					set[v] = struct{}{}
+				}
+			}
+			for k := range set {
+				arr := make([]int, len(*k))
+				for i, v := range *k {
+					arr[i] = v
+				}
+				partials = append(partials, arr)
+			}
+			partialLinearizations[i] = partials
+		}
+		info.history = history
+		info.partialLinearizations = partialLinearizations
+	}
+	var result CheckResult
+	if !ok {
+		result = Illegal
+	} else {
+		if timedOut {
+			result = Unknown
+		} else {
+			result = Ok
+		}
+	}
+	return result, info
 }
 
-func CheckEvents(model Model, history []Event) bool {
-	return CheckEventsTimeout(model, history, 0)
-}
-
-// timeout = 0 means no timeout
-// if this operation times out, then a false positive is possible
-func CheckEventsTimeout(model Model, history []Event, timeout time.Duration) bool {
+func checkEvents(model Model, history []Event, verbose bool, timeout time.Duration) (CheckResult, linearizationInfo) {
 	model = fillDefault(model)
 	partitions := model.PartitionEvent(history)
-	ok := true
-	results := make(chan bool)
-	kill := int32(0)
-	for _, subhistory := range partitions {
-		l := makeLinkedEntries(convertEntries(renumber(subhistory)))
-		go func() {
-			results <- checkSingle(model, l, &kill)
-		}()
+	l := make([][]entry, len(partitions))
+	for i, subhistory := range partitions {
+		l[i] = convertEntries(renumber(subhistory))
 	}
-	var timeoutChan <-chan time.Time
-	if timeout > 0 {
-		timeoutChan = time.After(timeout)
+	return checkParallel(model, l, verbose, timeout)
+}
+
+func checkOperations(model Model, history []Operation, verbose bool, timeout time.Duration) (CheckResult, linearizationInfo) {
+	model = fillDefault(model)
+	partitions := model.Partition(history)
+	l := make([][]entry, len(partitions))
+	for i, subhistory := range partitions {
+		l[i] = makeEntries(subhistory)
 	}
-	count := 0
-loop:
-	for {
-		select {
-		case result := <-results:
-			ok = ok && result
-			if !ok {
-				atomic.StoreInt32(&kill, 1)
-				break loop
-			}
-			count++
-			if count >= len(partitions) {
-				break loop
-			}
-		case <-timeoutChan:
-			break loop // if we time out, we might get a false positive
-		}
-	}
-	return ok
+	return checkParallel(model, l, verbose, timeout)
 }

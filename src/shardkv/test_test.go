@@ -636,7 +636,7 @@ func TestUnreliable3(t *testing.T) {
 
 	// log.Printf("Checking linearizability of %d operations", len(operations))
 	// start := time.Now()
-	ok := linearizability.CheckOperationsTimeout(linearizability.KvModel(), operations, linearizabilityCheckTimeout)
+	ok := linearizability.CheckOperations(linearizability.KvModel(), operations)
 	// dur := time.Since(start)
 	// log.Printf("Linearizability check done in %s; result: %t", time.Since(start).String(), ok)
 	if !ok {
