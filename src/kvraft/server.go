@@ -11,7 +11,6 @@ import (
 )
 
 const Debug = 0
-const LockTimeDebug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -52,27 +51,11 @@ type KVServer struct {
 	// 所以我们需要在checkApplyCh和Get/PutAppend之间通信
 	// 而且每一条请求都要维护一个ch
 	opApplyCh map[int]chan Op
-	// excuted     map[int64]bool
-	term int
+	term      int
 	// for each clerk, we need to know their last request number (this one is monotonically increasing)
 	// so if we ever get a smaller request number, we know this is a duplicate
 	lastClerkAppliedOpIndex map[int64]int
 	lastRaftAppliedLogIndex int
-
-	lockTime time.Time
-}
-
-func (kv *KVServer) acquireLock() {
-	kv.mu.Lock()
-	kv.lockTime = time.Now()
-}
-
-func (kv *KVServer) releaseLock(function string) {
-	elapsed := time.Since(kv.lockTime)
-	kv.mu.Unlock()
-	if LockTimeDebug > 0 {
-		DPrintf("function %v lock time elapsed: %v", function, elapsed)
-	}
 }
 
 func (kv *KVServer) checkApplyCh() {
@@ -82,7 +65,7 @@ func (kv *KVServer) checkApplyCh() {
 			clerkIdentifier := command.ClerkIdentifier
 			clerkOpIndex := command.ClearkOpIndex   // this is clerk applied ops counter
 			raftLogAppliedIndex := msg.CommandIndex // this is raft log applied index
-			kv.acquireLock()
+			kv.mu.Lock()
 			// 这里再检查一遍是因为提交到raft的log可能也有重复，会被apply两次，所以要检查是否已经提交过
 			// 重复的原因可能是这样的：
 			// 0. raft中有partition导致了term的变化，leader换人了
@@ -94,14 +77,13 @@ func (kv *KVServer) checkApplyCh() {
 			if _, ok := kv.lastClerkAppliedOpIndex[clerkIdentifier]; !ok {
 				kv.lastClerkAppliedOpIndex[clerkIdentifier] = clerkOpIndex - 1
 			}
-			// DPrintf("Server %d lastRaftAppliedLogIndex %d raftLogAppliedIndex %d", kv.me, kv.lastRaftAppliedLogIndex, raftLogAppliedIndex)
-			ret := ""
+			// ret := ""
 			if kv.lastRaftAppliedLogIndex == raftLogAppliedIndex-1 {
 				new := clerkOpIndex > kv.lastClerkAppliedOpIndex[clerkIdentifier]
 				if command.Op == "Get" {
 					if val, ok := kv.storage[command.Key]; ok {
 						command.Value = val
-						ret = val
+						// ret = val
 					} else {
 						command.Err = ErrNoKey
 					}
@@ -123,23 +105,21 @@ func (kv *KVServer) checkApplyCh() {
 					}
 				}
 				kv.lastRaftAppliedLogIndex = raftLogAppliedIndex
-				kv.persister.Log(raftLogAppliedIndex, command, kv.me, "", ret)
-				// kv.checkStateSize()
-				DPrintf("Server %d, OP %v applied to state machine", kv.me, command)
+				// kv.persister.Log(raftLogAppliedIndex, command, kv.me, "", ret)
+				// DPrintf("Server %d, OP %v applied to state machine", kv.me, command)
 				if ch, ok := kv.opApplyCh[raftLogAppliedIndex]; ok {
 					ch <- command
 					delete(kv.opApplyCh, raftLogAppliedIndex)
 				}
 			} else {
 				kv.rf.SetLastApplied(kv.lastRaftAppliedLogIndex)
-				// kv.rf.Replay(kv.lastRaftAppliedLogIndex)
-				DPrintf("Server %d, index %d OP %v not applied to state machine, expecting index %d", kv.me, raftLogAppliedIndex, command, kv.lastRaftAppliedLogIndex+1)
+				// DPrintf("Server %d, index %d OP %v not applied to state machine, expecting index %d", kv.me, raftLogAppliedIndex, command, kv.lastRaftAppliedLogIndex+1)
 			}
-			kv.releaseLock("checkApplyCh")
+			kv.mu.Unlock()
 		case raft.InstallSnapshotMsg:
-			kv.acquireLock()
+			kv.mu.Lock()
 			kv.installSnapshot(command.Data)
-			kv.releaseLock("installSnapshot")
+			kv.mu.Unlock()
 		}
 	}
 }
@@ -150,22 +130,6 @@ func (kv *KVServer) checkApplyCh() {
 // 在partition的时候，如果当前leader未commit，那么partition heal的时候，当前clerk等待的response永远都不会来，因为当前未提交的op
 // 已经被新leader自己的log覆盖了，但是第一条的解决方案仅限于有新的op来的时候，如果当前clerk一直没有得到response，那么它就会永远阻塞下去
 // 不会有新的op提交，这样就导致问题了
-// func (kv *KVServer) checkTerm() {
-// 	for {
-// 		kv.acquireLock()
-// 		term, _ := kv.rf.GetState()
-// 		if term != kv.term {
-// 			kv.term = term
-// 			msg := Op{ClerkIdentifier: -1}
-// 			for key, ch := range kv.opApplyCh {
-// 				ch <- msg
-// 				delete(kv.opApplyCh, key)
-// 			}
-// 		}
-// 		kv.releaseLock("checkTerm")
-// 		time.Sleep(500 * time.Millisecond)
-// 	}
-// }
 
 func (kv *KVServer) checkStateSize() {
 	if kv.maxraftstate == -1 {
@@ -176,7 +140,7 @@ func (kv *KVServer) checkStateSize() {
 		// kv.rf.SetLastApplied(kv.lastRaftAppliedLogIndex)
 		if kv.persister.RaftStateSize() > kv.maxraftstate {
 			// approaches the threshold, but how close??
-			kv.acquireLock()
+			kv.mu.Lock()
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
 			// 我们不保存opApplyCh的原因是在kvserver崩溃的时候所有goroutine也一同崩溃了
@@ -184,14 +148,14 @@ func (kv *KVServer) checkStateSize() {
 			e.Encode(kv.storage)
 			e.Encode(kv.lastClerkAppliedOpIndex)
 			e.Encode(kv.lastRaftAppliedLogIndex)
-			appliedOp := kv.persister.GetAppliedOp()
-			tmp := make([]Op, len(appliedOp))
-			for i := range appliedOp {
-				tmp[i] = appliedOp[i].(Op)
-			}
-			e.Encode(tmp)
+			// appliedOp := kv.persister.GetAppliedOp()
+			// tmp := make([]Op, len(appliedOp))
+			// for i := range appliedOp {
+			// 	tmp[i] = appliedOp[i].(Op)
+			// }
+			// e.Encode(tmp)
 			data := w.Bytes()
-			kv.releaseLock("checkStateSize")
+			kv.mu.Unlock()
 			kv.rf.Snapshot(data, kv.lastRaftAppliedLogIndex)
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -203,15 +167,15 @@ func (kv *KVServer) installSnapshot(data []byte) {
 		return
 	}
 	labgob.Register(Op{})
-	// kv.acquireLock()
-	// defer kv.releaseLock("installSnapshot")
+	// kv.mu.Lock()
+	// defer kv.mu.Unlock()
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var storage map[string]string
 	var lastAppliedID map[int64]int
 	var lastAppliedIndex int
-	var appliedOp []Op
+	// var appliedOp []Op
 
 	if e := d.Decode(&storage); e != nil {
 		DPrintf("FATAL DECODE ERROR %s", e)
@@ -225,10 +189,10 @@ func (kv *KVServer) installSnapshot(data []byte) {
 		DPrintf("FATAL DECODE ERROR %s", e)
 		return
 	}
-	if e := d.Decode(&appliedOp); e != nil {
-		DPrintf("FATAL DECODE ERROR %s", e)
-		return
-	}
+	// if e := d.Decode(&appliedOp); e != nil {
+	// 	DPrintf("FATAL DECODE ERROR %s", e)
+	// 	return
+	// }
 
 	// Never roll back storage to an early state
 	// what is done is done
@@ -237,11 +201,11 @@ func (kv *KVServer) installSnapshot(data []byte) {
 		// last applied should monotonically increase
 		return
 	}
-	tmp := make([]interface{}, len(appliedOp))
-	for i := range appliedOp {
-		tmp[i] = appliedOp[i]
-	}
-	kv.persister.SetAppliedOp(tmp, kv.me)
+	// tmp := make([]interface{}, len(appliedOp))
+	// for i := range appliedOp {
+	// 	tmp[i] = appliedOp[i]
+	// }
+	// kv.persister.SetAppliedOp(tmp, kv.me)
 	kv.storage = storage
 	kv.lastClerkAppliedOpIndex = lastAppliedID
 	kv.lastRaftAppliedLogIndex = lastAppliedIndex
@@ -252,11 +216,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	listenCh := make(chan Op, 1)
 	// ID := args.ID
-	kv.acquireLock()
+	kv.mu.Lock()
 	op := Op{"Get", args.Key, "", args.Identifier, args.Counter, ""}
 	index, _, isLeader := kv.rf.Start(op)
 	kv.opApplyCh[index] = listenCh
-	kv.releaseLock("Get-2")
+	kv.mu.Unlock()
 
 	if !isLeader {
 		reply.WrongLeader = true
@@ -267,26 +231,17 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// 此后没有任何新提交的op了，这时我们不可能通过新提交的op来判断leader变化
 	// 只能主动询问自己的peer leadership是否已经变化了
 	// (但这是否真的是一个问题？，在partition发生的时候也有可能永远等下去直到partition解决)
-
-	// 本质上我们只在意某一条提交的op是不是永远不会被commit了
-	// 能确认这一点的就是本该出现在某一位置的这个op被另一个op占了
-	// 所以我们就等着就行了
-	// DPrintf("Server %d, OP %d submmitted to Raft", kv.me, op.ID%100)
-
 	// Solution: We apply this time out mechanism
 	select {
 	case <-time.After(time.Duration(1000 * time.Millisecond)):
 		kv.mu.Lock()
 		delete(kv.opApplyCh, index)
-		// DPrintf("time out")
 		reply.WrongLeader = true
 		kv.mu.Unlock()
 	case appliedOp := <-listenCh:
 		if appliedOp.ClerkIdentifier != args.Identifier || appliedOp.ClearkOpIndex != args.Counter {
-			// DPrintf("Server %d, OP %d applied differs from op %d submmitted", kv.me, appliedOp.ID%100, op.ID%100)
 			reply.WrongLeader = true
 		} else {
-			// DPrintf("Server %d, OP %d commitment confirmed", kv.me, op.ID%100)
 			reply.WrongLeader = false
 			if appliedOp.Err == ErrNoKey {
 				reply.Err = ErrNoKey
@@ -294,45 +249,30 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				reply.Value = appliedOp.Value
 				reply.Err = OK
 			}
-			// kv.mu.Lock()
-			// // for any read we need to make sure that one is applied before we actually read anything from storage
-			// val, ok := kv.storage[appliedOp.Key]
-			// if ok {
-			// 	reply.Value = val
-			// 	reply.Err = OK
-			// } else {
-			// 	reply.Err = ErrNoKey
-			// }
-			// kv.mu.Unlock()
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.acquireLock()
+	kv.mu.Lock()
 	listenCh := make(chan Op, 1)
-	// ID := args.ID
-	// Get and PutAppend is different
-	// Get is idempotent but PutAppend is not so we need to check if there is duplicate
 	if _, ok := kv.lastClerkAppliedOpIndex[args.Identifier]; ok && args.Counter < kv.lastClerkAppliedOpIndex[args.Identifier] {
-		// DPrintf("Server %d, op ID %d has been excuted", kv.me, ID)
 		reply.WrongLeader = false
 		reply.Err = OK
-		kv.releaseLock("PutAppend-1")
+		kv.mu.Unlock()
 		return
 	}
 	op := Op{args.Op, args.Key, args.Value, args.Identifier, args.Counter, ""}
 	index, _, isLeader := kv.rf.Start(op)
 	kv.opApplyCh[index] = listenCh
-	kv.releaseLock("PutAppend-2")
+	kv.mu.Unlock()
 
 	if !isLeader {
 		reply.WrongLeader = true
 		return
 	}
 
-	// DPrintf("Server %d, OP %d submmitted to Raft", kv.me, op.ID%100)
 	select {
 	case <-time.After(time.Duration(1000 * time.Millisecond)):
 		kv.mu.Lock()
@@ -342,10 +282,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 	case appliedOp := <-listenCh:
 		if appliedOp.ClerkIdentifier != args.Identifier || appliedOp.ClearkOpIndex != args.Counter {
-			// DPrintf("Server %d, OP %d applied differs from op %d submmitted", kv.me, appliedOp.ID%100, op.ID%100)
 			reply.WrongLeader = true
 		} else {
-			// DPrintf("Server %d, OP %d commitment confirmed", kv.me, op.ID%100)
 			reply.WrongLeader = false
 			reply.Err = OK
 		}
@@ -404,7 +342,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.term = 0
 	kv.installSnapshot(kv.persister.ReadSnapshot())
 	go kv.checkApplyCh()
-	// go kv.checkTerm()
 	go kv.checkStateSize()
 
 	// You may need initialization code here.
