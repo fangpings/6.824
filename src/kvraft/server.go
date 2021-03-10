@@ -214,18 +214,17 @@ func (kv *KVServer) installSnapshot(data []byte) {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	listenCh := make(chan Op, 1)
-	// ID := args.ID
 	kv.mu.Lock()
 	op := Op{"Get", args.Key, "", args.Identifier, args.Counter, ""}
 	index, _, isLeader := kv.rf.Start(op)
-	kv.opApplyCh[index] = listenCh
-	kv.mu.Unlock()
-
 	if !isLeader {
 		reply.WrongLeader = true
+		kv.mu.Unlock()
 		return
 	}
+	listenCh := make(chan Op, 1)
+	kv.opApplyCh[index] = listenCh
+	kv.mu.Unlock()
 
 	// 一个场景是某个kvserver刚向leader提交了op，leader没有commit就崩溃了
 	// 此后没有任何新提交的op了，这时我们不可能通过新提交的op来判断leader变化
@@ -256,7 +255,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	listenCh := make(chan Op, 1)
 	if _, ok := kv.lastClerkAppliedOpIndex[args.Identifier]; ok && args.Counter < kv.lastClerkAppliedOpIndex[args.Identifier] {
 		reply.WrongLeader = false
 		reply.Err = OK
@@ -265,19 +263,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op := Op{args.Op, args.Key, args.Value, args.Identifier, args.Counter, ""}
 	index, _, isLeader := kv.rf.Start(op)
-	kv.opApplyCh[index] = listenCh
-	kv.mu.Unlock()
-
 	if !isLeader {
 		reply.WrongLeader = true
+		kv.mu.Unlock()
 		return
 	}
+	listenCh := make(chan Op, 1)
+	kv.opApplyCh[index] = listenCh
+	kv.mu.Unlock()
 
 	select {
 	case <-time.After(time.Duration(1000 * time.Millisecond)):
 		kv.mu.Lock()
 		delete(kv.opApplyCh, index)
-		// DPrintf("time out")
 		reply.WrongLeader = true
 		kv.mu.Unlock()
 	case appliedOp := <-listenCh:
@@ -288,7 +286,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = OK
 		}
 	}
-
 }
 
 //

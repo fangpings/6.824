@@ -154,7 +154,7 @@ func (rf *Raft) Snapshot(snapshot []byte, lastAppliedIndex int) {
 	// }
 	logData := rf.makePersistData()
 	rf.persister.SaveStateAndSnapshot(logData, snapshot)
-	if (rf.commitIndex > rf.lastTotalLogIndex()) {
+	if rf.commitIndex > rf.lastTotalLogIndex() {
 		DPrintf("term %d id %d commit index %d leads current log %d b", rf.currentTerm, rf.me, rf.commitIndex, rf.lastTotalLogIndex())
 	}
 }
@@ -398,7 +398,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.LastLogTerm > rf.getLastLogTerm() ||
-	(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.lastTotalLogIndex()) {
+		(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.lastTotalLogIndex()) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		rf.lastUpdate = time.Now()
@@ -439,7 +439,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, okChan chan int) {
 	rf.mu.Lock()
 	req := &RequestVoteArgs{rf.currentTerm, rf.me, rf.lastTotalLogIndex(), rf.getLastLogTerm()}
-	DPrintf("term %d id %d sending request vote to %d request %v", rf.currentTerm, rf.me, server, req)
+	// DPrintf("term %d id %d sending request vote to %d request %v", rf.currentTerm, rf.me, server, req)
 	rf.mu.Unlock()
 	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", req, reply)
@@ -480,6 +480,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	// DPrintf("term %d id %d receive append entries %v ", rf.currentTerm, rf.me, args)
 
 	rf.lastUpdate = time.Now()
 
@@ -560,6 +561,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 		} else {
 			entries = rf.log[rf.total2CurrentLogIndex(rf.nextIndex[server]):]
 		}
+		DPrintf("leader sends %v", entries)
 		req := &AppendEntriesArgs{
 			rf.currentTerm,
 			rf.me,
@@ -728,7 +730,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.onBecomingFollower()
 	go rf.checkingCommit()
-	// go rf.reportingState()
+	go rf.reportingState()
 
 	rf.lastAppendTime = time.Now()
 
@@ -921,15 +923,15 @@ func (rf *Raft) getLastLogTerm() int {
 func (rf *Raft) reportingState() {
 	for {
 		rf.mu.Lock()
-		switch rf.state {
-		case follower:
-			DPrintf("term %d id %d in state follower commit index %d", rf.currentTerm, rf.me, rf.commitIndex)
-		case candidate:
-			DPrintf("term %d id %d in state candidate commit index %d", rf.currentTerm, rf.me, rf.commitIndex)
-		case leader:
-			DPrintf("term %d id %d in state leader commit index %d", rf.currentTerm, rf.me, rf.commitIndex)
-		}
-		// DPrintf("term %d id %d current log %v current log %v", rf.currentTerm, rf.me, rf.log)
+		// switch rf.state {
+		// case follower:
+		// 	DPrintf("term %d id %d in state follower commit index %d", rf.currentTerm, rf.me, rf.commitIndex)
+		// case candidate:
+		// 	DPrintf("term %d id %d in state candidate commit index %d", rf.currentTerm, rf.me, rf.commitIndex)
+		// case leader:
+		// 	DPrintf("term %d id %d in state leader commit index %d", rf.currentTerm, rf.me, rf.commitIndex)
+		// }
+		DPrintf("term %d id %d current log %v", rf.currentTerm, rf.me, rf.log)
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
