@@ -730,7 +730,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.onBecomingFollower()
 	go rf.checkingCommit()
-	go rf.reportingState()
+	// go rf.reportingState()
 
 	rf.lastAppendTime = time.Now()
 

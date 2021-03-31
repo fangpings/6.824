@@ -38,7 +38,7 @@ type Reply struct {
 	config          Config
 }
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(me int, format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 && me == 0 {
@@ -60,16 +60,18 @@ func (sm *ShardMaster) checkApplyCh() {
 		if sm.lastRaftAppliedLogIndex == raftLogAppliedIndex-1 {
 			new := clerkOpIndex > sm.lastClerkAppliedOpIndex[clerkIdentifier]
 			reply := Reply{clerkIdentifier: clerkIdentifier, clearkOpIndex: clerkOpIndex}
-			oldconfig := sm.configs[len(sm.configs)-1]
+			// oldconfig := sm.configs[len(sm.configs)-1]
 			switch op.Args.(type) {
 			case JoinArgs:
 				if new {
 					reply.BaseReply.Err = sm.processJoin(op.Args.(JoinArgs).Servers)
+					DPrintf(sm.me, "MASTER ID %d join %v", sm.me, op.Args.(JoinArgs).Servers)
 				}
 				break
 			case LeaveArgs:
 				if new {
 					reply.BaseReply.Err = sm.processLeave(op.Args.(LeaveArgs).GIDs)
+					DPrintf(sm.me, "MASTER ID %d leave %v", sm.me, op.Args.(LeaveArgs).GIDs)
 				}
 				break
 			case MoveArgs:
@@ -85,7 +87,7 @@ func (sm *ShardMaster) checkApplyCh() {
 				DPrintf(sm.me, "WARNING UNSUPPORTED OP TYPE %v", reflect.TypeOf(op.Args))
 			}
 			sm.lastRaftAppliedLogIndex = raftLogAppliedIndex
-			DPrintf(sm.me, "ID %d apply command type %v %v\n last config %v\n last config %v", sm.me, reflect.TypeOf(op.Args), op.Args, oldconfig, sm.configs[len(sm.configs)-1])
+			// DPrintf(sm.me, "ID %d apply command type %v %v\n last config %v\n last config %v", sm.me, reflect.TypeOf(op.Args), op.Args, oldconfig, sm.configs[len(sm.configs)-1])
 			if ch, ok := sm.opApplyCh[raftLogAppliedIndex]; ok {
 				// DPrintf("ID %d reply %v", sm.me, reply)
 				ch <- reply

@@ -1,21 +1,23 @@
 package shardkv
 
-import "shardmaster"
-import "labrpc"
-import "testing"
-import "os"
+import (
+	"labrpc"
+	"os"
+	"shardmaster"
+	"testing"
 
-// import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "raft"
-import "strconv"
-import "fmt"
-import "time"
+	// import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"raft"
+	"runtime"
+	"strconv"
+	"sync"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -301,6 +303,7 @@ func (cfg *config) shardclerk() *shardmaster.Clerk {
 
 // tell the shardmaster that a group is joining.
 func (cfg *config) join(gi int) {
+	fmt.Printf("Group %d joined ...\n", gi)
 	cfg.joinm([]int{gi})
 }
 
@@ -319,6 +322,7 @@ func (cfg *config) joinm(gis []int) {
 
 // tell the shardmaster that a group is leaving.
 func (cfg *config) leave(gi int) {
+	fmt.Printf("Group %d left ...\n", gi)
 	cfg.leavem([]int{gi})
 }
 

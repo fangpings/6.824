@@ -1,14 +1,15 @@
 package shardkv
 
-import "linearizability"
-
-import "testing"
-import "strconv"
-import "time"
-import "fmt"
-import "sync/atomic"
-import "sync"
-import "math/rand"
+import (
+	"fmt"
+	"linearizability"
+	"math/rand"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 const linearizabilityCheckTimeout = 1 * time.Second
 
@@ -95,6 +96,7 @@ func TestJoinLeave(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	fmt.Printf("Group 0 joined ...\n")
 
 	n := 10
 	ka := make([]string, n)
@@ -109,6 +111,7 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	cfg.join(1)
+	fmt.Printf("Group 1 joined ...\n")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -118,6 +121,7 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	cfg.leave(0)
+	fmt.Printf("Group 0 left ...\n")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -131,6 +135,7 @@ func TestJoinLeave(t *testing.T) {
 
 	cfg.checklogs()
 	cfg.ShutdownGroup(0)
+	fmt.Printf("Final check ...\n")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
