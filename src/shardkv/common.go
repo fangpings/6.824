@@ -64,4 +64,6 @@ type GetShardReply struct {
 	ConfigNum int
 	State int
 	Data map[string]string
+	LastClerkAppliedOpIndex map[int64]int
+	Valid bool
 }

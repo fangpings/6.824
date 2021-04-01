@@ -48,11 +48,13 @@ type NewConfig struct {
 type ReconfigData struct {
 	Data       map[string]string
 	NextConfig shardmaster.Config
+	LastClerkAppliedOpIndex map[int64]int
 }
 
 type ReconfigAck struct {
 	Data       map[string]string
 	NextConfig shardmaster.Config
+	LastClerkAppliedOpIndex map[int64]int
 }
 
 type ShardKV struct {
@@ -289,8 +291,8 @@ func (kv *ShardKV) installSnapshot(data []byte, restart bool) {
 	kv.config = config
 	kv.state = state
 	if restart && state != normal {
-		go func() { 
-			nextConfig := kv.mck.Query(config.Num+1)
+		go func() {
+			nextConfig := kv.mck.Query(config.Num + 1)
 			kv.mu.Lock()
 			if nextConfig.Num > kv.config.Num {
 				kv.state = reconfigCollectData
@@ -300,6 +302,9 @@ func (kv *ShardKV) installSnapshot(data []byte, restart bool) {
 			}
 			kv.mu.Unlock()
 		}()
+	}
+	if !restart {
+		DPrintf("Group %d ID %d Config %d installing snapshot up to log %d", kv.gid, kv.me, kv.config.Num, lastAppliedIndex)
 	}
 	kv.rf.SetLastApplied(kv.lastRaftAppliedLogIndex)
 }
@@ -465,12 +470,14 @@ func (kv *ShardKV) sendGetState(gid int, newConfig shardmaster.Config, okChan ch
 	}
 }
 
-func (kv *ShardKV) sendGetShards(gid int, shards []int, config shardmaster.Config, resChan chan map[string]string) {
+func (kv *ShardKV) sendGetShards(gid int, shards []int, config shardmaster.Config, resChan chan GetShardReply) {
 	for {
 		kv.mu.Lock()
 		if _, isLeader := kv.rf.GetState(); kv.state != reconfigCollectData || !isLeader {
 			kv.mu.Unlock()
-			resChan <- nil
+			reply := GetShardReply{}
+			reply.Valid = false
+			resChan <- reply
 			return
 		}
 		args := GetShardArgs{config.Num, shards}
@@ -482,11 +489,13 @@ func (kv *ShardKV) sendGetShards(gid int, shards []int, config shardmaster.Confi
 		if ok {
 			if reply.ConfigNum > config.Num {
 				// they left this reconfig term, we should not retry
-				resChan <- nil
+				reply.Valid = false
+				resChan <- reply
 				return
 			} else if reply.ConfigNum == config.Num && reply.State != normal {
 				// they are in the same reconfig term as we are
-				resChan <- reply.Data
+				reply.Valid = true
+				resChan <- reply
 				DPrintf("Group %d ID %d Config %d sent get shards %v got %v", kv.gid, kv.me, kv.config.Num, shards, reply.Data)
 				return
 			}
@@ -550,26 +559,32 @@ func (kv *ShardKV) reconfigDataCollect(nextConfig shardmaster.Config) {
 			kv.mu.Lock()
 			candidates := kv.getPullFromServers(config, nextConfig)
 			DPrintf("Group %d ID %d Config %d getting reconfig data from %v", kv.gid, kv.me, kv.config.Num, candidates)
-			resChan := make(chan map[string]string)
+			resChan := make(chan GetShardReply)
 			for gid, shards := range candidates {
 				go kv.sendGetShards(gid, shards, config, resChan)
 			}
 			expected := len(candidates)
 			allData := map[string]string{}
+			appliedOpIndex := map[int64]int{}
 			get := 0
 			kv.mu.Unlock()
 			if expected > 0 {
 				func() {
 					for {
 						select {
-						case data := <-resChan:
+						case reply := <-resChan:
 							// chances are that we are lagging behind
 							// in that case retry is meaningless
-							if data == nil {
+							if !reply.Valid {
 								return
 							}
-							for k, v := range data {
+							for k, v := range reply.Data {
 								allData[k] = v
+							}
+							for k, v:= range reply.LastClerkAppliedOpIndex {
+								if index, ok := appliedOpIndex[k]; !ok || v > index {
+									appliedOpIndex[k] = v
+								}
 							}
 							get++
 							if get == expected {
@@ -582,7 +597,7 @@ func (kv *ShardKV) reconfigDataCollect(nextConfig shardmaster.Config) {
 			if get == expected {
 				// we get all the data we need
 				// replicate what we get through raft
-				reconfigData := ReconfigData{allData, nextConfig}
+				reconfigData := ReconfigData{allData, nextConfig, appliedOpIndex}
 				index, _, isLeader := kv.rf.Start(reconfigData)
 				if isLeader {
 					listenCh := make(chan Op, 1)
@@ -645,7 +660,7 @@ func (kv *ShardKV) reconfigAckCollect(reconfigData ReconfigData) {
 			}
 
 			if get == expected {
-				ack := ReconfigAck{reconfigData.Data, reconfigData.NextConfig}
+				ack := ReconfigAck{reconfigData.Data, reconfigData.NextConfig, reconfigData.LastClerkAppliedOpIndex}
 				index, _, isLeader := kv.rf.Start(ack)
 				if isLeader {
 					listenCh := make(chan Op, 1)
@@ -684,6 +699,11 @@ func (kv *ShardKV) reconfigEnd(reconfigAck ReconfigAck) {
 	for k, v := range reconfigAck.Data {
 		// TODO: delete keys here
 		kv.storage[k] = v
+	}
+	for k, v := range reconfigAck.LastClerkAppliedOpIndex {
+		if index, ok := kv.lastClerkAppliedOpIndex[k]; !ok || v > index {
+			kv.lastClerkAppliedOpIndex[k] = v
+		}
 	}
 }
 
@@ -729,7 +749,13 @@ func (kv *ShardKV) GetShards(args *GetShardArgs, reply *GetShardReply) {
 				}
 			}
 		}
+
+		lastClerkAppliedOpIndex := map[int64]int{}
+		for k, v := range kv.lastClerkAppliedOpIndex {
+			lastClerkAppliedOpIndex[k] = v
+		}
 		reply.Data = data
+		reply.LastClerkAppliedOpIndex = lastClerkAppliedOpIndex
 	}
 }
 
