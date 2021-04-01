@@ -46,14 +46,14 @@ type NewConfig struct {
 }
 
 type ReconfigData struct {
-	Data       map[string]string
-	NextConfig shardmaster.Config
+	Data                    map[string]string
+	NextConfig              shardmaster.Config
 	LastClerkAppliedOpIndex map[int64]int
 }
 
 type ReconfigAck struct {
-	Data       map[string]string
-	NextConfig shardmaster.Config
+	Data                    map[string]string
+	NextConfig              shardmaster.Config
 	LastClerkAppliedOpIndex map[int64]int
 }
 
@@ -581,7 +581,7 @@ func (kv *ShardKV) reconfigDataCollect(nextConfig shardmaster.Config) {
 							for k, v := range reply.Data {
 								allData[k] = v
 							}
-							for k, v:= range reply.LastClerkAppliedOpIndex {
+							for k, v := range reply.LastClerkAppliedOpIndex {
 								if index, ok := appliedOpIndex[k]; !ok || v > index {
 									appliedOpIndex[k] = v
 								}
@@ -700,6 +700,12 @@ func (kv *ShardKV) reconfigEnd(reconfigAck ReconfigAck) {
 		// TODO: delete keys here
 		kv.storage[k] = v
 	}
+	// clerk applied index也需要被复制一份
+	// 考虑如下情况，在某次reconfig前某clerk提交了一个op
+	// 在某段时间后这个op的确被执行了，但是出于某种原因并没有通知clerk
+	// 所以clerk在超时后重传了，但是此时已经是下一个config了，这个shard
+	// 已经被转移到了另外的server上负责，而该server并不知道这个clerk在之前的server上
+	// 已经提交过这个op，因为它没有最高index的信息
 	for k, v := range reconfigAck.LastClerkAppliedOpIndex {
 		if index, ok := kv.lastClerkAppliedOpIndex[k]; !ok || v > index {
 			kv.lastClerkAppliedOpIndex[k] = v
